@@ -1,0 +1,111 @@
+version: '3'
+
+vars:
+  GO_VERSION: '1.26.5'
+  GCI_VERSION: 'v0.14.0'
+  GOLINT_VERSION: 'v2.13.1'
+  GOFUMPT_VERSION: 'v0.11.0'
+
+  BIN_DIR: "{{.ROOT_DIR}}/bin"
+  GOLANGCI_LINT: "{{.BIN_DIR}}/golangci-lint"
+  GCI: "{{.BIN_DIR}}/gci"
+  GOFUMPT: "{{.BIN_DIR}}/gofumpt"
+  
+
+tasks:
+  default:
+    cmds:
+      - "task --list"
+  
+  # ── Install ────────────────────────────────────────────────
+  install:go:
+    desc: Verify / install Go {{.GO_VERSION}}
+    silent: true
+    cmds:
+      - |
+        current=$(go version 2>/dev/null | grep -oP 'go\K[0-9]+\.[0-9]+\.[0-9]+' || true)
+        if [ "$current" != "{{.GO_VERSION}}" ]; then
+          echo "⚠  Go {{.GO_VERSION}} is not active (found ${current:-none})."
+          echo "   Install it via your version manager (goenv / asdf / mise) or:"
+          echo "     go install golang.org/dl/go{{.GO_VERSION}}@latest"
+          echo "     go{{.GO_VERSION}} download"
+          exit 1
+        fi
+        echo "✔  Go {{.GO_VERSION}}"
+    status:
+      - '[[ $(go version) == *"go{{.GO_VERSION}}"* ]]'
+
+  install:gci:
+    desc: Install gci {{.GCI}}
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - GOBIN={{.BIN_DIR}} go install github.com/daixiang0/gci@{{.GCI_VERSION}}
+    status:
+      - gci --version 2>/dev/null | grep -q '{{trimPrefix "v" .GCI_VERSION}}'
+
+  install:golint:
+    desc: Install golangci-lint {{.GOLINT}}
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - GOBIN={{.BIN_DIR}} go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLINT_VERSION}}
+    status:
+      - "{{.GOLANGCI_LINT}} version 2>/dev/null | grep -q '{{.GOLINT_VERSION}}'"
+
+  install:gofmt:
+    desc: Install gofumpt {{.GOFMT}}
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - GOBIN={{.BIN_DIR}} go install mvdan.cc/gofumpt@{{.GOFUMPT_VERSION}}
+    status:
+      - "{{.GOFUMPT}} --version 2>/dev/null | grep -q '{{trimPrefix \"v\" .GOFUMPT_VERSION}}'"
+
+  install:
+    desc: Install all linters & formatters
+    deps:
+      - install:go
+      - install:gci
+      - install:golint
+      - install:gofmt
+
+  # ── Lint ───────────────────────────────────────────────────
+
+  lint:
+    desc: Run golangci-lint
+    deps: [install:golint]
+    cmds:
+      - "{{.GOLANGCI_LINT}} run ./..."
+
+  lint:fix:
+    desc: Run golangci-lint with auto-fix
+    deps: [install:golint]
+    cmds:
+      - "{{.GOLANGCI_LINT}} run --fix ./..."
+
+  # ── Format ────────────────────────────────────────────────
+
+  fmt:
+    desc: Format code
+    deps: [install:gofmt, install:gci]
+    cmds:
+      - "{{.GOFUMPT}} -w ."
+      - "{{.GCI}} write --skip-generated -s standard -s default -s localmodule ."
+
+  fmt:check:
+    desc: Check formatting without modifying files
+    deps: [install:gofmt, install:gci]
+    cmds:
+      - "{{.GOFUMPT}} -d ."
+      - "{{.GCI}} diff --skip-generated -s standard -s default -s localmodule ."
+
+  # ── BUILD ─────────────────────────────────────────────────
+  build:
+    desc: Build project
+    cmds:
+      - GOBIN={{.BIN_DIR}} go build -o {{.BIN_DIR}}/blowrbot ./cmd/blowrbot/main.go
+
+  # ── RUN ───────────────────────────────────────────────────
+  run:
+    desc: Run project
+    cmds:
+      - GOBIN={{.BIN_DIR}} go run ./cmd/blowrbot/main.go
+        
