@@ -103,11 +103,11 @@ tasks:
   build:
     desc: Build project
     cmds:
-      - GOBIN={{.BIN_DIR}} go build -o {{.BIN_DIR}}/blowrbot ./cmd/blowrbot/main.go
+      - GOBIN={{.BIN_DIR}} go build -o {{.BIN_DIR}}/loudbot ./cmd/loudbot/main.go
 
   # ── RUN ───────────────────────────────────────────────────
   run:
     desc: Run project
     cmds:
-      - GOBIN={{.BIN_DIR}} go run ./cmd/blowrbot/main.go
+      - GOBIN={{.BIN_DIR}} go run ./cmd/loudbot/main.go
         
