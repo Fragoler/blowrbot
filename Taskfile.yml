@@ -7,11 +7,13 @@ vars:
   GCI_VERSION: 'v0.14.0'
   GOLINT_VERSION: 'v2.13.1'
   GOFUMPT_VERSION: 'v0.11.0'
+  GOOSE_VERSION: 'v3.28.0'
 
   BIN_DIR: "{{.ROOT_DIR}}/bin"
   GOLANGCI_LINT: "{{.BIN_DIR}}/golangci-lint"
   GCI: "{{.BIN_DIR}}/gci"
   GOFUMPT: "{{.BIN_DIR}}/gofumpt"
+  GOOSE: "{{.BIN_DIR}}/goose"
   
 
 tasks:
@@ -61,6 +63,14 @@ tasks:
     status:
       - "{{.GOFUMPT}} --version 2>/dev/null | grep -q '{{trimPrefix \"v\" .GOFUMPT_VERSION}}'"
 
+  install:goose:
+    desc: Install goose {{.GOOSE_VERSION}}
+    cmds:
+      - mkdir -p {{.BIN_DIR}}
+      - GOBIN={{.BIN_DIR}} go install github.com/pressly/goose/v3/cmd/goose@{{.GOOSE_VERSION}}
+    status:
+      - "{{.GOOSE}} -version 2>/dev/null | grep -q '{{trimPrefix \"v\" .GOOSE_VERSION}}'"
+
   install:
     desc: Install all linters & formatters
     deps:
@@ -68,6 +78,7 @@ tasks:
       - install:gci
       - install:golint
       - install:gofmt
+      - install:goose
 
   # ── Lint ───────────────────────────────────────────────────
 
@@ -98,6 +109,55 @@ tasks:
     cmds:
       - "{{.GOFUMPT}} -d ."
       - "{{.GCI}} diff --skip-generated -s standard -s default -s localmodule ."
+
+  # ── Migrations ────────────────────────────────────────────
+  migrate:up:
+    desc: Apply all pending migrations
+    deps: [install:goose]
+    env: &goose_env
+      GOOSE_DRIVER: postgres  
+      GOOSE_MIGRATION_DIR: "{{.ROOT_DIR}}/migrations"
+    cmds:
+      - "{{.GOOSE}} up"
+
+  migrate:down:
+    desc: Roll back the last migration
+    deps: [install:goose]
+    env: *goose_env
+    cmds:
+      - "{{.GOOSE}} down"
+
+  migrate:status:
+    desc: Show which migrations are applied
+    deps: [install:goose]
+    env: *goose_env
+    cmds:
+      - "{{.GOOSE}} status"
+
+  migrate:create:
+    desc: Create a new migration, e.g. task migrate:create -- add_bans_index
+    deps: [install:goose]
+    env: *goose_env
+    cmds:
+      - "{{.GOOSE}} -s create {{.CLI_ARGS}} sql"
+
+  # ── Test ──────────────────────────────────────────────────
+
+  test:
+    desc: Run unit tests
+    cmds:
+      - go test ./... -count=1
+
+  test:cover:
+    desc: Run unit tests with coverage
+    cmds:
+      - go test ./... -count=1 -cover
+
+  test:integration:
+    desc: Run storage tests against a real Postgres (needs LOUDBOT_TEST_POSTGRES)
+    deps: [install:goose]
+    cmds:
+      - go test -tags=integration ./... -count=1
 
   # ── BUILD ─────────────────────────────────────────────────
   build:

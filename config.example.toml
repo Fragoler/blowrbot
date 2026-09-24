@@ -1,0 +1,33 @@
+# Non-secret settings only. Secrets (BOT_TOKEN, POSTGRES_PASSWORD) come from the
+# environment — see .env.example — and are never read from this file.
+
+[service]
+name = "loudbot"
+log_level = "info"          # debug | info | warn | error
+
+[telegram]
+mode = "polling"            # webhook — when there is time for TLS
+bot_username = "my_anon_bot"        # without @, used to build comment deep links
+channel_id = -1001234567890         # the channel the bot watches
+discussion_chat_id = -1009876543210 # linked discussion group where comments are published
+debug = false
+
+[postgres]
+host = "postgres"
+port = 5432
+user = "loudbot"
+dbname = "loudbot"
+sslmode = "disable"
+max_conns = 10
+
+[moderation]
+chat_id = -1001111111111    # private moderators chat
+
+[comments]
+max_text_len = 3500
+nickname_separator = ": "
+draft_ttl = "1h"          # how long a "comment" tap stays valid
+
+# The bot's first comment under every post, the one carrying the button.
+# Leave empty for the built-in wording.
+invite_text = "Комментарии к этому посту анонимные. Нажмите кнопку ниже, выберите маску — и пишите."

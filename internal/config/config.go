@@ -1,64 +1,263 @@
-// Package config загружает настройки бота из переменных окружения.
+// Package config loads service settings from a TOML file and secrets from the environment.
+// Secrets never come from the file: the TOML fields for them are explicitly skipped.
 package config
 
 import (
+	"errors"
 	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 const (
-	envToken       = "BOT_TOKEN"
-	envChannelID   = "CHANNEL_ID"
-	envFirstText   = "FIRST_COMMENT_TEXT"
-	envDebug       = "DEBUG"
-	defaultComment = "Я первый!"
+	// EnvConfigPath overrides the default config file location.
+	EnvConfigPath = "CONFIG_PATH"
+	// EnvBotToken holds the Telegram bot token.
+	EnvBotToken = "BOT_TOKEN"
+	// EnvPostgresPassword holds the Postgres password.
+	EnvPostgresPassword = "POSTGRES_PASSWORD"
+
+	defaultPath = "config.toml"
 )
 
-// Config — настройки запуска бота.
+// Mode is the way the bot receives updates from Telegram.
+type Mode string
+
+const (
+	ModePolling Mode = "polling"
+	ModeWebhook Mode = "webhook"
+)
+
 type Config struct {
-	// Token — токен бота, выданный @BotFather.
-	Token string
-	// ChannelID — ID канала, посты которого комментируем.
-	// Ноль означает «любой канал, привязанный к чату обсуждений».
-	ChannelID int64
-	// FirstComment — текст, который бот пишет первым комментарием к посту.
-	FirstComment string
-	// Debug включает подробный лог запросов к Telegram API.
-	Debug bool
+	Service    Service    `toml:"service"`
+	Telegram   Telegram   `toml:"telegram"`
+	Postgres   Postgres   `toml:"postgres"`
+	Moderation Moderation `toml:"moderation"`
+	Comments   Comments   `toml:"comments"`
 }
 
-// Load читает конфигурацию из окружения.
-func Load() (Config, error) {
-	cfg := Config{
-		Token:        strings.TrimSpace(os.Getenv(envToken)),
-		FirstComment: defaultComment,
+type Service struct {
+	Name     string `toml:"name"`
+	LogLevel string `toml:"log_level"`
+}
+
+type Telegram struct {
+	Mode        Mode   `toml:"mode"`
+	BotUsername string `toml:"bot_username"`
+	Debug       bool   `toml:"debug"`
+
+	// ChannelID is the channel the bot posts to and watches.
+	ChannelID int64 `toml:"channel_id"`
+	// DiscussionChatID is the linked discussion group where comments are published.
+	DiscussionChatID int64 `toml:"discussion_chat_id"`
+
+	Token string `toml:"-"`
+}
+
+type Postgres struct {
+	Host     string `toml:"host"`
+	Port     int    `toml:"port"`
+	User     string `toml:"user"`
+	DBName   string `toml:"dbname"`
+	SSLMode  string `toml:"sslmode"`
+	MaxConns int32  `toml:"max_conns"`
+
+	Password string `toml:"-"`
+}
+
+type Moderation struct {
+	ChatID int64 `toml:"chat_id"`
+}
+
+type Comments struct {
+	// MaxTextLen caps the comment body before the nickname prefix is added.
+	MaxTextLen int `toml:"max_text_len"`
+	// NicknameSeparator sits between the nickname and the comment body.
+	NicknameSeparator string `toml:"nickname_separator"`
+	// DraftTTL bounds how long a deep-link tap stays valid, e.g. "1h" or "30m".
+	DraftTTL string `toml:"draft_ttl"`
+	// InviteText is the bot's first comment under every post; empty means the default.
+	InviteText string `toml:"invite_text"`
+}
+
+// TTL parses DraftTTL; Validate reports a malformed value separately.
+func (c Comments) TTL() (time.Duration, error) {
+	d, err := time.ParseDuration(strings.TrimSpace(c.DraftTTL))
+	if err != nil {
+		return 0, fmt.Errorf("comments.draft_ttl=%q: %w", c.DraftTTL, err)
 	}
 
-	if cfg.Token == "" {
-		return Config{}, fmt.Errorf("%s не задан", envToken)
+	if d <= 0 {
+		return 0, fmt.Errorf("comments.draft_ttl=%q must be positive", c.DraftTTL)
 	}
 
-	if raw := strings.TrimSpace(os.Getenv(envChannelID)); raw != "" {
-		id, err := strconv.ParseInt(raw, 10, 64)
-		if err != nil {
-			return Config{}, fmt.Errorf("%s=%q: %w", envChannelID, raw, err)
-		}
-		cfg.ChannelID = id
+	return d, nil
+}
+
+// Load reads the TOML file at path (falling back to CONFIG_PATH, then config.toml),
+// applies defaults, overlays secrets from the environment and validates the result.
+func Load(path string) (Config, error) {
+	if path == "" {
+		path = strings.TrimSpace(os.Getenv(EnvConfigPath))
+	}
+	if path == "" {
+		path = defaultPath
 	}
 
-	if raw := strings.TrimSpace(os.Getenv(envFirstText)); raw != "" {
-		cfg.FirstComment = raw
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
 
-	if raw := strings.TrimSpace(os.Getenv(envDebug)); raw != "" {
-		debug, err := strconv.ParseBool(raw)
-		if err != nil {
-			return Config{}, fmt.Errorf("%s=%q: %w", envDebug, raw, err)
-		}
-		cfg.Debug = debug
+	cfg := defaults()
+	if err := toml.Unmarshal(raw, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
+	}
+
+	applySecrets(&cfg)
+
+	if err := cfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("config %q: %w", path, err)
 	}
 
 	return cfg, nil
+}
+
+func defaults() Config {
+	return Config{
+		Service: Service{
+			Name:     "loudbot",
+			LogLevel: "info",
+		},
+		Telegram: Telegram{
+			Mode: ModePolling,
+		},
+		Postgres: Postgres{
+			Host:     "localhost",
+			Port:     5432,
+			SSLMode:  "disable",
+			MaxConns: 10,
+		},
+		Comments: Comments{
+			MaxTextLen:        3500,
+			NicknameSeparator: ": ",
+			DraftTTL:          "1h",
+		},
+	}
+}
+
+func applySecrets(cfg *Config) {
+	cfg.Telegram.Token = strings.TrimSpace(os.Getenv(EnvBotToken))
+	cfg.Postgres.Password = os.Getenv(EnvPostgresPassword)
+}
+
+func (c Config) Validate() error {
+	var errs []error
+
+	if c.Telegram.Token == "" {
+		errs = append(errs, fmt.Errorf("%s is not set", EnvBotToken))
+	}
+
+	if strings.TrimSpace(c.Telegram.BotUsername) == "" {
+		errs = append(errs, errors.New("telegram.bot_username is required for comment deep links"))
+	}
+
+	switch c.Telegram.Mode {
+	case ModePolling, ModeWebhook:
+	default:
+		errs = append(errs, fmt.Errorf("telegram.mode=%q: want %q or %q", c.Telegram.Mode, ModePolling, ModeWebhook))
+	}
+
+	if c.Telegram.ChannelID == 0 {
+		errs = append(errs, errors.New("telegram.channel_id is required"))
+	}
+
+	if c.Telegram.DiscussionChatID == 0 {
+		errs = append(errs, errors.New("telegram.discussion_chat_id is required"))
+	}
+
+	if c.Moderation.ChatID == 0 {
+		errs = append(errs, errors.New("moderation.chat_id is required"))
+	}
+
+	if strings.TrimSpace(c.Postgres.Host) == "" {
+		errs = append(errs, errors.New("postgres.host is required"))
+	}
+
+	if strings.TrimSpace(c.Postgres.DBName) == "" {
+		errs = append(errs, errors.New("postgres.dbname is required"))
+	}
+
+	if strings.TrimSpace(c.Postgres.User) == "" {
+		errs = append(errs, errors.New("postgres.user is required"))
+	}
+
+	if c.Postgres.Port <= 0 || c.Postgres.Port > 65535 {
+		errs = append(errs, fmt.Errorf("postgres.port=%d is out of range", c.Postgres.Port))
+	}
+
+	if c.Comments.MaxTextLen <= 0 {
+		errs = append(errs, fmt.Errorf("comments.max_text_len=%d must be positive", c.Comments.MaxTextLen))
+	}
+
+	if _, err := c.Comments.TTL(); err != nil {
+		errs = append(errs, err)
+	}
+
+	if _, err := parseLevel(c.Service.LogLevel); err != nil {
+		errs = append(errs, err)
+	}
+
+	return errors.Join(errs...)
+}
+
+// LogLevel maps service.log_level onto slog; an unparsable value falls back to info
+// so that logging never blocks startup (Validate reports it separately).
+func (c Config) LogLevel() slog.Level {
+	level, err := parseLevel(c.Service.LogLevel)
+	if err != nil {
+		return slog.LevelInfo
+	}
+
+	return level
+}
+
+func parseLevel(raw string) (slog.Level, error) {
+	var level slog.Level
+	if err := level.UnmarshalText([]byte(strings.TrimSpace(raw))); err != nil {
+		return 0, fmt.Errorf("service.log_level=%q: %w", raw, err)
+	}
+
+	return level, nil
+}
+
+// DSN builds a connection string for both pgxpool and database/sql. Pool sizing is
+// applied in code rather than here, because database/sql rejects pool-only options.
+func (p Postgres) DSN() string {
+	u := url.URL{
+		Scheme: "postgres",
+		Host:   net.JoinHostPort(p.Host, strconv.Itoa(p.Port)),
+		Path:   "/" + p.DBName,
+	}
+
+	if p.Password == "" {
+		u.User = url.User(p.User)
+	} else {
+		u.User = url.UserPassword(p.User, p.Password)
+	}
+
+	q := url.Values{}
+	if p.SSLMode != "" {
+		q.Set("sslmode", p.SSLMode)
+	}
+	u.RawQuery = q.Encode()
+
+	return u.String()
 }

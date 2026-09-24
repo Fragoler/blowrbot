@@ -2,47 +2,76 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
 
-	"loudbot/internal/bot"
+	"loudbot/internal/comment"
 	"loudbot/internal/config"
+	"loudbot/internal/storage"
+	"loudbot/internal/telegram"
 )
 
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel()}))
-	slog.SetDefault(log)
+	configPath := flag.String("config", "", "path to config.toml (default: $CONFIG_PATH, then ./config.toml)")
+	flag.Parse()
 
-	if err := run(log); err != nil {
-		log.Error("бот завершился с ошибкой", slog.Any("error", err))
+	// Bootstrap logger: replaced once the config tells us the real level.
+	slog.SetDefault(newLogger(slog.LevelInfo))
+
+	if err := run(*configPath); err != nil {
+		slog.Error("bot stopped with error", slog.Any("error", err))
 		os.Exit(1)
 	}
 }
 
-func run(log *slog.Logger) error {
+func run(configPath string) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	cfg, err := config.Load()
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		return fmt.Errorf("конфигурация: %w", err)
+		return fmt.Errorf("config: %w", err)
 	}
 
-	bot, err := bot.New(cfg, log)
-	if err != nil {
-		return fmt.Errorf("инициализация бота: %w", err)
+	log := newLogger(cfg.LogLevel()).With(slog.String("service", cfg.Service.Name))
+	slog.SetDefault(log)
+
+	if err := storage.Migrate(ctx, cfg.Postgres, log); err != nil {
+		return fmt.Errorf("migrate: %w", err)
 	}
+
+	store, err := storage.Open(ctx, cfg.Postgres, log)
+	if err != nil {
+		return fmt.Errorf("storage: %w", err)
+	}
+	defer store.Close()
+
+	bot, err := telegram.New(cfg, store, log)
+	if err != nil {
+		return fmt.Errorf("telegram: %w", err)
+	}
+
+	ttl, err := cfg.Comments.TTL()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	// Antiabuse is not wired yet, so the core runs with a permissive guard.
+	comments := comment.New(store, bot.Publisher(), comment.AllowAll{}, comment.Options{
+		BotUsername:       cfg.Telegram.BotUsername,
+		MaxTextLen:        cfg.Comments.MaxTextLen,
+		NicknameSeparator: cfg.Comments.NicknameSeparator,
+		DraftTTL:          ttl,
+	})
+	bot.UseComments(comments)
 
 	return bot.Run(ctx)
 }
 
-func logLevel() slog.Level {
-	if os.Getenv("DEBUG") == "true" {
-		return slog.LevelDebug
-	}
-
-	return slog.LevelInfo
+func newLogger(level slog.Level) *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 }

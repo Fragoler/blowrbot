@@ -30,3 +30,10 @@ bin/
 
 # JetBrains
 .idea/
+
+# local config with real ids
+config.toml
+
+# claude settings
+.claude
+CLAUDE.md
