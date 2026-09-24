@@ -25,7 +25,7 @@ linters:
               desc: use crypto.SHA256 instead
             - pkg: crypto/sha512
               desc: use crypto.SHA512 instead
-    gosec:
+#    gosec:
 #      excludes:
 #        - G117 # Exported sensitive fields
 #        - G703 # Path taint (from arguments)

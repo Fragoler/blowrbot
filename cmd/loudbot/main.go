@@ -15,6 +15,9 @@ import (
 	"loudbot/internal/telegram"
 )
 
+// version is stamped at build time with -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	configPath := flag.String("config", "", "path to config.toml (default: $CONFIG_PATH, then ./config.toml)")
 	flag.Parse()
@@ -37,7 +40,10 @@ func run(configPath string) error {
 		return fmt.Errorf("config: %w", err)
 	}
 
-	log := newLogger(cfg.LogLevel()).With(slog.String("service", cfg.Service.Name))
+	log := newLogger(cfg.LogLevel()).With(
+		slog.String("service", cfg.Service.Name),
+		slog.String("version", version),
+	)
 	slog.SetDefault(log)
 
 	if err := storage.Migrate(ctx, cfg.Postgres, log); err != nil {

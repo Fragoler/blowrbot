@@ -50,8 +50,9 @@ func Migrate(ctx context.Context, cfg config.Postgres, log *slog.Logger) error {
 	}
 
 	for _, r := range results {
+		// Not "version": the root logger already carries the build version.
 		log.Info("migration applied",
-			slog.Int64("version", r.Source.Version),
+			slog.Int64("migration_version", r.Source.Version),
 			slog.String("name", r.Source.Path),
 			slog.Duration("duration", r.Duration),
 		)

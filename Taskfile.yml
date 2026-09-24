@@ -86,13 +86,14 @@ tasks:
     desc: Run golangci-lint
     deps: [install:golint]
     cmds:
-      - "{{.GOLANGCI_LINT}} run ./..."
+      # The build tag is needed or the integration tests go unlinted.
+      - "{{.GOLANGCI_LINT}} run --build-tags=integration ./..."
 
   lint:fix:
     desc: Run golangci-lint with auto-fix
     deps: [install:golint]
     cmds:
-      - "{{.GOLANGCI_LINT}} run --fix ./..."
+      - "{{.GOLANGCI_LINT}} run --build-tags=integration --fix ./..."
 
   # ── Format ────────────────────────────────────────────────
 
@@ -107,8 +108,15 @@ tasks:
     desc: Check formatting without modifying files
     deps: [install:gofmt, install:gci]
     cmds:
+      # gofumpt -d exits non-zero on a diff, gci diff does not: gate it by output.
       - "{{.GOFUMPT}} -d ."
-      - "{{.GCI}} diff --skip-generated -s standard -s default -s localmodule ."
+      - |
+        drift=$({{.GCI}} diff --skip-generated -s standard -s default -s localmodule .)
+        if [ -n "$drift" ]; then
+          echo "$drift"
+          echo "imports are not sorted; run: task fmt"
+          exit 1
+        fi
 
   # ── Migrations ────────────────────────────────────────────
   migrate:up:
@@ -155,7 +163,6 @@ tasks:
 
   test:integration:
     desc: Run storage tests against a real Postgres (needs LOUDBOT_TEST_POSTGRES)
-    deps: [install:goose]
     cmds:
       - go test -tags=integration ./... -count=1
 
@@ -164,6 +171,13 @@ tasks:
     desc: Build project
     cmds:
       - GOBIN={{.BIN_DIR}} go build -o {{.BIN_DIR}}/loudbot ./cmd/loudbot/main.go
+
+  # ── Docker ────────────────────────────────────────────────
+
+  docker:build:
+    desc: Build the deploy image locally
+    cmds:
+      - docker build -f deploy/Dockerfile -t loudbot:local --build-arg VERSION=local .
 
   # ── RUN ───────────────────────────────────────────────────
   run:
