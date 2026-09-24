@@ -26,4 +26,7 @@ go.work.sum
 .env
 
 # build directory
-/bin
+bin/
+
+# JetBrains
+.idea/
