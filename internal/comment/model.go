@@ -46,22 +46,13 @@ type User struct {
 // later dropped from the config does not rewrite messages already in the channel.
 type Nickname struct {
 	Label string
-	Emoji string
 }
 
 // Display renders the mask as readers see it in the discussion group.
 func (n Nickname) Display() string {
 	label := strings.TrimSpace(n.Label)
-	emoji := strings.TrimSpace(n.Emoji)
 
-	switch {
-	case emoji == "":
-		return label
-	case label == "":
-		return emoji
-	default:
-		return emoji + " " + label
-	}
+	return label
 }
 
 // Post links a channel post to its auto-forwarded copy in the discussion group.

@@ -20,8 +20,8 @@ const (
 )
 
 var (
-	fox = comment.Nickname{Label: "Лис", Emoji: "🦊"}
-	owl = comment.Nickname{Label: "Сова", Emoji: "🦉"}
+	fox = comment.Nickname{Label: "Лис"}
+	owl = comment.Nickname{Label: "Сова"}
 
 	now = time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 )
@@ -285,7 +285,7 @@ func TestSubmitPublishesAndRecords(t *testing.T) {
 		CommentID:        got.ID,
 		ChatID:           discussionID,
 		ReplyToMessageID: threadMsgID,
-		Text:             "🦉 Сова: привет",
+		Text:             "Сова: привет",
 		Media:            media,
 	}, pub.requests[0], "the comment lands in the post's thread with the mask prefix")
 
@@ -319,7 +319,7 @@ func TestSubmitMediaOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	require.Len(t, pub.requests, 1)
-	assert.Equal(t, "🦊 Лис", pub.requests[0].Text, "a media-only comment is captioned with the mask alone")
+	assert.Equal(t, "Лис", pub.requests[0].Text, "a media-only comment is captioned with the mask alone")
 }
 
 func TestSubmitCountsRunesNotBytes(t *testing.T) {
@@ -491,7 +491,7 @@ func TestDefaultsAreApplied(t *testing.T) {
 
 	_, err := svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: "hi"})
 	require.NoError(t, err)
-	assert.Equal(t, "🦊 Лис: hi", pub.requests[0].Text)
+	assert.Equal(t, "Лис: hi", pub.requests[0].Text)
 }
 
 func TestNicknames(t *testing.T) {

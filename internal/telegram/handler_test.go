@@ -43,17 +43,17 @@ func TestNicknameKeyboard(t *testing.T) {
 	t.Parallel()
 
 	nicknames := []comment.Nickname{
-		{Label: "Лис", Emoji: "🦊"},
-		{Label: "Сова", Emoji: "🦉"},
-		{Label: "Ёж", Emoji: "🦔"},
+		{Label: "Лис"},
+		{Label: "Сова"},
+		{Label: "Ёж"},
 	}
 
 	markup := nicknameKeyboard(nicknames, "Сова")
 
 	require.Len(t, markup.InlineKeyboard, 2, "two per row leaves a trailing row of one")
-	assert.Equal(t, "🦊 Лис", markup.InlineKeyboard[0][0].Text)
-	assert.Equal(t, "✅ 🦉 Сова", markup.InlineKeyboard[0][1].Text, "the chosen mask is ticked")
-	assert.Equal(t, "🦔 Ёж", markup.InlineKeyboard[1][0].Text)
+	assert.Equal(t, "Лис", markup.InlineKeyboard[0][0].Text)
+	assert.Equal(t, "✅ Сова", markup.InlineKeyboard[0][1].Text, "the chosen mask is ticked")
+	assert.Equal(t, "Ёж", markup.InlineKeyboard[1][0].Text)
 
 	label, err := comment.ParseNicknameCallback(markup.InlineKeyboard[1][0].CallbackData)
 	require.NoError(t, err)

@@ -84,7 +84,7 @@ func run(configPath string) error {
 func nicknames(cfg config.Config) []comment.Nickname {
 	out := make([]comment.Nickname, 0, len(cfg.Nicknames))
 	for _, n := range cfg.Nicknames {
-		out = append(out, comment.Nickname{Label: n.Label, Emoji: n.Emoji})
+		out = append(out, comment.Nickname{Label: n.Label})
 	}
 
 	return out

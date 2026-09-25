@@ -35,11 +35,9 @@ chat_id = -1003
 
 [[nicknames]]
 label = "Лис"
-emoji = "🦊"
 
 [[nicknames]]
 label = "Сова"
-emoji = "🦉"
 `
 
 func write(t *testing.T, body string) string {
@@ -65,7 +63,7 @@ func TestLoad(t *testing.T) {
 	assert.Equal(t, "disable", cfg.Postgres.SSLMode, "defaults fill what the file omits")
 	assert.Equal(t, 3500, cfg.Comments.MaxTextLen)
 	assert.Equal(t, ": ", cfg.Comments.NicknameSeparator)
-	assert.Equal(t, []config.Nickname{{Label: "Лис", Emoji: "🦊"}, {Label: "Сова", Emoji: "🦉"}}, cfg.Nicknames)
+	assert.Equal(t, []config.Nickname{{Label: "Лис"}, {Label: "Сова"}}, cfg.Nicknames)
 	assert.Equal(t, "postgres://loudbot:p%40ss%20word@db:5432/loudbot?sslmode=disable", cfg.Postgres.DSN())
 }
 

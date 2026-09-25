@@ -53,7 +53,6 @@ type Config struct {
 // every published comment, so renaming one here does not rewrite old messages.
 type Nickname struct {
 	Label string `toml:"label"`
-	Emoji string `toml:"emoji"`
 }
 
 type Service struct {

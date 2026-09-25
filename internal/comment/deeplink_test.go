@@ -109,10 +109,8 @@ func TestNicknameDisplay(t *testing.T) {
 		nick comment.Nickname
 		want string
 	}{
-		{name: "emoji and label", nick: comment.Nickname{Emoji: "🦊", Label: "Лис"}, want: "🦊 Лис"},
-		{name: "label only", nick: comment.Nickname{Label: "Лис"}, want: "Лис"},
-		{name: "emoji only", nick: comment.Nickname{Emoji: "🦊"}, want: "🦊"},
-		{name: "trims", nick: comment.Nickname{Emoji: " 🦊 ", Label: " Лис "}, want: "🦊 Лис"},
+		{name: "label", nick: comment.Nickname{Label: "Лис"}, want: "Лис"},
+		{name: "trims", nick: comment.Nickname{Label: " Лис "}, want: "Лис"},
 		{name: "empty", nick: comment.Nickname{}, want: ""},
 	}
 
@@ -128,7 +126,7 @@ func TestNicknameDisplay(t *testing.T) {
 func TestFormatBody(t *testing.T) {
 	t.Parallel()
 
-	nick := comment.Nickname{Emoji: "🦊", Label: "Лис"}
+	nick := comment.Nickname{Label: "Лис"}
 
 	cases := []struct {
 		name string
@@ -136,11 +134,11 @@ func TestFormatBody(t *testing.T) {
 		text string
 		want string
 	}{
-		{name: "text", nick: nick, text: "привет", want: "🦊 Лис: привет"},
-		{name: "trims text", nick: nick, text: "  привет  ", want: "🦊 Лис: привет"},
-		{name: "media only keeps the mask alone", nick: nick, text: "", want: "🦊 Лис"},
+		{name: "text", nick: nick, text: "привет", want: "Лис: привет"},
+		{name: "trims text", nick: nick, text: "  привет  ", want: "Лис: привет"},
+		{name: "media only keeps the mask alone", nick: nick, text: "", want: "Лис"},
 		{name: "blank mask falls back to text", nick: comment.Nickname{}, text: "привет", want: "привет"},
-		{name: "multiline text", nick: nick, text: "one\ntwo", want: "🦊 Лис: one\ntwo"},
+		{name: "multiline text", nick: nick, text: "one\ntwo", want: "Лис: one\ntwo"},
 	}
 
 	for _, tc := range cases {
