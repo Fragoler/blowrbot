@@ -320,3 +320,61 @@ VALUES ($1, $2, $3, $4)`
 
 	return nil
 }
+
+// Remember records message ids of a private chat for a later wipe. It is called
+// on every message in that chat, so a repeat must not fail.
+func (s *Storage) Remember(ctx context.Context, userID int64, messageIDs ...int) error {
+	const q = `
+INSERT INTO private_messages (user_id, message_id)
+SELECT $1, unnest($2::int[])
+ON CONFLICT DO NOTHING`
+
+	if _, err := s.pool.Exec(ctx, q, userID, int32s(messageIDs)); err != nil {
+		return fmt.Errorf("remember private messages: %w", err)
+	}
+
+	return nil
+}
+
+// Messages lists the private chat's remembered message ids, oldest first.
+func (s *Storage) Messages(ctx context.Context, userID int64) ([]int, error) {
+	const q = `SELECT message_id FROM private_messages WHERE user_id = $1 ORDER BY message_id`
+
+	rows, err := s.pool.Query(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list private messages: %w", err)
+	}
+	defer rows.Close()
+
+	var out []int
+	for rows.Next() {
+		var id int
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan private message: %w", err)
+		}
+		out = append(out, id)
+	}
+
+	return out, rows.Err()
+}
+
+// Forget drops the rows of messages that are gone from the chat.
+func (s *Storage) Forget(ctx context.Context, userID int64, messageIDs ...int) error {
+	const q = `DELETE FROM private_messages WHERE user_id = $1 AND message_id = ANY($2::int[])`
+
+	if _, err := s.pool.Exec(ctx, q, userID, int32s(messageIDs)); err != nil {
+		return fmt.Errorf("forget private messages: %w", err)
+	}
+
+	return nil
+}
+
+// int32s converts to the width Postgres uses for int[].
+func int32s(ids []int) []int32 {
+	out := make([]int32, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, int32(id)) //nolint:gosec // G115: Telegram message ids fit in int32.
+	}
+
+	return out
+}

@@ -10,6 +10,7 @@ import (
 
 	tgbot "github.com/go-telegram/bot"
 
+	"loudbot/internal/chatlog"
 	"loudbot/internal/comment"
 	"loudbot/internal/config"
 )
@@ -20,11 +21,26 @@ type Bot struct {
 	cfg      config.Config
 	log      *slog.Logger
 	comments *comment.Service
+	history  *chatlog.Log
+}
+
+// deleter adapts the Telegram client to chatlog.Deleter.
+type deleter struct {
+	api *tgbot.Bot
+}
+
+func (d deleter) DeleteMessages(ctx context.Context, chatID int64, messageIDs []int) error {
+	_, err := d.api.DeleteMessages(ctx, &tgbot.DeleteMessagesParams{
+		ChatID:     chatID,
+		MessageIDs: messageIDs,
+	})
+
+	return err
 }
 
 // New builds the Telegram client. The comment service is attached afterwards with
 // UseComments, because it needs the publisher that only an existing client provides.
-func New(cfg config.Config, log *slog.Logger) (*Bot, error) {
+func New(cfg config.Config, history chatlog.Repository, log *slog.Logger) (*Bot, error) {
 	b := &Bot{
 		cfg: cfg,
 		log: log,
@@ -52,6 +68,7 @@ func New(cfg config.Config, log *slog.Logger) (*Bot, error) {
 		return nil, fmt.Errorf("create telegram client: %w", err)
 	}
 	b.api = api
+	b.history = chatlog.New(history, deleter{api: api}, log)
 
 	return b, nil
 }

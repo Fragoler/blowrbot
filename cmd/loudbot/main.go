@@ -56,7 +56,7 @@ func run(configPath string) error {
 	}
 	defer store.Close()
 
-	bot, err := telegram.New(cfg, log)
+	bot, err := telegram.New(cfg, store, log)
 	if err != nil {
 		return fmt.Errorf("telegram: %w", err)
 	}

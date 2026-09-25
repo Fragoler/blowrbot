@@ -76,7 +76,7 @@ func probe(ctx context.Context, t *testing.T) *pgx.Conn {
 // left by an earlier run.
 const reset = `
 TRUNCATE posts, comment_drafts, comments, suggested_posts, reports, identity_map,
-         audit_log, users
+         audit_log, users, private_messages
 RESTART IDENTITY CASCADE`
 
 // Masks come from config.toml now, so the tests pick their own labels.
@@ -361,4 +361,41 @@ func TestReplyChain(t *testing.T) {
 
 	_, err = st.Comment(ctx, 999_999)
 	require.ErrorIs(t, err, comment.ErrNotFound)
+}
+
+func TestPrivateChatLog(t *testing.T) {
+	st, ctx := open(t)
+
+	const user = int64(10_009)
+
+	empty, err := st.Messages(ctx, user)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+
+	require.NoError(t, st.Remember(ctx, user, 7, 5, 6))
+
+	got, err := st.Messages(ctx, user)
+	require.NoError(t, err)
+	assert.Equal(t, []int{5, 6, 7}, got, "oldest first, so a chat disappears from the top")
+
+	// Every message in the chat is recorded, so a repeat must not fail.
+	require.NoError(t, st.Remember(ctx, user, 5, 8))
+
+	got, err = st.Messages(ctx, user)
+	require.NoError(t, err)
+	assert.Equal(t, []int{5, 6, 7, 8}, got)
+
+	require.NoError(t, st.Forget(ctx, user, 5, 7))
+
+	got, err = st.Messages(ctx, user)
+	require.NoError(t, err)
+	assert.Equal(t, []int{6, 8}, got)
+
+	require.NoError(t, st.Remember(ctx, user), "an empty batch is a no-op")
+	require.NoError(t, st.Forget(ctx, user), "and so is forgetting nothing")
+
+	// The log is keyed by user and must not leak between chats.
+	other, err := st.Messages(ctx, user+1)
+	require.NoError(t, err)
+	assert.Empty(t, other)
 }

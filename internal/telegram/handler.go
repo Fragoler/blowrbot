@@ -103,13 +103,30 @@ func (b *Bot) onPrivateMessage(ctx context.Context, msg *models.Message) {
 		return
 	}
 
+	// A deep link opens a new flow, so the previous conversation goes first —
+	// including the "/start" Telegram made the user send to get here.
 	if payload, ok := startPayload(msg.Text); ok {
+		b.wipe(ctx, msg.From.ID, msg.ID)
 		b.onStart(ctx, msg, payload)
 
 		return
 	}
 
+	b.remember(ctx, msg.From.ID, msg.ID)
 	b.onComment(ctx, msg)
+}
+
+// wipe clears the private chat before a new flow draws its first message.
+func (b *Bot) wipe(ctx context.Context, userID int64, extra ...int) {
+	if err := b.history.Wipe(ctx, userID, extra...); err != nil {
+		b.log.Warn("wipe private chat", slog.Int64("user_id", userID), slog.Any("error", err))
+	}
+}
+
+func (b *Bot) remember(ctx context.Context, userID int64, messageIDs ...int) {
+	if err := b.history.Record(ctx, userID, messageIDs...); err != nil {
+		b.log.Warn("record private message", slog.Int64("user_id", userID), slog.Any("error", err))
+	}
 }
 
 // onStart greets an author arriving from a post: it quotes the post, links back
@@ -144,9 +161,14 @@ func (b *Bot) onStart(ctx context.Context, msg *models.Message, payload string) 
 		}
 	}
 
-	if _, err := b.api.SendMessage(ctx, params); err != nil {
+	prompt, err := b.api.SendMessage(ctx, params)
+	if err != nil {
 		b.log.Error("send comment prompt", slog.Int64("user_id", userID), slog.Any("error", err))
+
+		return
 	}
+
+	b.remember(ctx, userID, prompt.ID)
 }
 
 // onComment stages what the author wrote and asks which mask to sign it with.
@@ -191,6 +213,8 @@ func (b *Bot) onComment(ctx context.Context, msg *models.Message) {
 
 		return
 	}
+
+	b.remember(ctx, userID, prompt.ID)
 
 	if err := b.comments.AttachPrompt(ctx, userID, prompt.ID); err != nil {
 		b.log.Error("attach nickname keyboard", slog.Int64("user_id", userID), slog.Any("error", err))
@@ -238,7 +262,7 @@ func (b *Bot) onNicknameChosen(ctx context.Context, query *models.CallbackQuery)
 	b.replacePrompt(ctx, query, b.cfg.Messages.Published)
 }
 
-// onCancel drops the staged message, taking both it and the keyboard off screen.
+// onCancel drops the staged message, taking both it and the keyboard off-screen.
 func (b *Bot) onCancel(ctx context.Context, query *models.CallbackQuery) {
 	cancelled, err := b.comments.Cancel(ctx, query.From.ID)
 	if err != nil {
@@ -282,6 +306,16 @@ func (b *Bot) deleteMessage(ctx context.Context, chatID int64, messageID int) {
 			slog.Int("message_id", messageID),
 			slog.Any("error", err),
 		)
+
+		return
+	}
+
+	b.forget(ctx, chatID, messageID)
+}
+
+func (b *Bot) forget(ctx context.Context, userID int64, messageIDs ...int) {
+	if err := b.history.Forget(ctx, userID, messageIDs...); err != nil {
+		b.log.Debug("forget private message", slog.Int64("user_id", userID), slog.Any("error", err))
 	}
 }
 
@@ -401,10 +435,16 @@ func extractMedia(msg *models.Message) ([]comment.Media, error) {
 	}
 }
 
+// reply answers in the private chat, where chatID is also the user id.
 func (b *Bot) reply(ctx context.Context, chatID int64, text string) {
-	if _, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text}); err != nil {
+	sent, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text})
+	if err != nil {
 		b.log.Error("send reply", slog.Int64("chat_id", chatID), slog.Any("error", err))
+
+		return
 	}
+
+	b.remember(ctx, chatID, sent.ID)
 }
 
 func (b *Bot) replyError(ctx context.Context, chatID int64, op string, userID int64, err error) {
