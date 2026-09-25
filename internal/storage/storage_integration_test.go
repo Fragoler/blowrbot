@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,8 +19,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"loudbot/internal/achievement"
 	"loudbot/internal/comment"
 	"loudbot/internal/config"
+	"loudbot/internal/profile"
 	"loudbot/internal/storage"
 )
 
@@ -72,19 +75,62 @@ func probe(ctx context.Context, t *testing.T) *pgx.Conn {
 	return conn
 }
 
+// seed is the nicknames table as the migration leaves it, captured before any
+// test touches it. Tests add and retire masks, so reset restores this snapshot
+// rather than truncating — and taking it from the database rather than copying
+// the migration's list keeps the two from drifting apart.
+type mask struct {
+	code  string
+	label string
+}
+
+var (
+	seedOnce sync.Once
+	seed     []mask
+	// fox and owl are two seeded labels, named once the snapshot is taken. These
+	// tests do not run in parallel, so plain variables are enough.
+	fox, owl string
+)
+
+func captureSeed(ctx context.Context, t *testing.T, conn *pgx.Conn) {
+	t.Helper()
+
+	rows, err := conn.Query(ctx, `SELECT code, label FROM nicknames ORDER BY id`)
+	require.NoError(t, err)
+	defer rows.Close()
+
+	for rows.Next() {
+		var m mask
+		require.NoError(t, rows.Scan(&m.code, &m.label))
+		seed = append(seed, m)
+	}
+	require.NoError(t, rows.Err())
+	require.GreaterOrEqual(t, len(seed), 2, "the tests need at least two seeded masks")
+
+	fox, owl = seed[0].label, seed[1].label
+}
+
+func restoreSeed(ctx context.Context, t *testing.T, conn *pgx.Conn) {
+	t.Helper()
+
+	_, err := conn.Exec(ctx, `DELETE FROM nicknames`)
+	require.NoError(t, err)
+
+	for _, m := range seed {
+		_, err := conn.Exec(ctx, `INSERT INTO nicknames (code, label) VALUES ($1, $2)`, m.code, m.label)
+		require.NoError(t, err)
+	}
+}
+
 // reset empties everything the tests write. Without it a test would read rows
 // left by an earlier run.
 const reset = `
 TRUNCATE posts, comment_drafts, comments, suggested_posts, reports, identity_map,
-         audit_log, users, private_messages
+         audit_log, users, private_messages, user_achievements, achievement_nicknames,
+         achievement_rules, achievements
 RESTART IDENTITY CASCADE`
 
-// Masks come from config.toml now, so the tests pick their own labels.
-const (
-	fox = "Лис"
-	owl = "Сова"
-)
-
+// Masks live in the nicknames table, seeded by the migration.
 func open(t *testing.T) (*storage.Storage, context.Context) {
 	t.Helper()
 
@@ -94,8 +140,13 @@ func open(t *testing.T) (*storage.Storage, context.Context) {
 
 	require.NoError(t, storage.Migrate(ctx, cfg, log))
 
-	_, err := probe(ctx, t).Exec(ctx, reset)
+	conn := probe(ctx, t)
+
+	_, err := conn.Exec(ctx, reset)
 	require.NoError(t, err)
+
+	seedOnce.Do(func() { captureSeed(ctx, t, conn) })
+	restoreSeed(ctx, t, conn)
 
 	st, err := storage.Open(ctx, cfg, log)
 	require.NoError(t, err)
@@ -398,4 +449,270 @@ func TestPrivateChatLog(t *testing.T) {
 	other, err := st.Messages(ctx, user+1)
 	require.NoError(t, err)
 	assert.Empty(t, other)
+}
+
+func TestNicknamesGatedByAchievements(t *testing.T) {
+	st, ctx := open(t)
+
+	const (
+		plain   = int64(10_010)
+		awarded = int64(10_011)
+	)
+
+	for _, id := range []int64{plain, awarded} {
+		_, err := st.EnsureUser(ctx, id)
+		require.NoError(t, err)
+	}
+
+	seeded, err := st.Nicknames(ctx, plain)
+	require.NoError(t, err)
+	require.NotEmpty(t, seeded, "the migration seeds the public masks")
+
+	conn := probe(ctx, t)
+
+	var lockedID int64
+	require.NoError(t, conn.QueryRow(ctx,
+		`INSERT INTO nicknames (code, label) VALUES ('mammoth', 'Мамонт') RETURNING id`).Scan(&lockedID))
+
+	var achievementID int64
+	require.NoError(t, conn.QueryRow(ctx,
+		`INSERT INTO achievements (code, title) VALUES ('digger', 'Раскопки') RETURNING id`).Scan(&achievementID))
+
+	_, err = conn.Exec(ctx,
+		`INSERT INTO achievement_nicknames (achievement_id, nickname_id) VALUES ($1, $2)`,
+		achievementID, lockedID)
+	require.NoError(t, err)
+
+	// Gated the moment an achievement points at it, for everyone.
+	gated, err := st.Nicknames(ctx, plain)
+	require.NoError(t, err)
+	assert.Equal(t, seeded, gated, "a mask behind an achievement is hidden until it is earned")
+
+	_, err = conn.Exec(ctx,
+		`INSERT INTO user_achievements (user_id, achievement_id) VALUES ($1, $2)`,
+		awarded, achievementID)
+	require.NoError(t, err)
+
+	unlocked, err := st.Nicknames(ctx, awarded)
+	require.NoError(t, err)
+	assert.Len(t, unlocked, len(seeded)+1)
+	assert.Contains(t, labels(unlocked), "Мамонт")
+
+	stillGated, err := st.Nicknames(ctx, plain)
+	require.NoError(t, err)
+	assert.NotContains(t, labels(stillGated), "Мамонт", "one person earning it does not open it for others")
+
+	// Retiring a mask hides it without touching comments already published under it.
+	_, err = conn.Exec(ctx, `UPDATE nicknames SET is_active = FALSE WHERE label = $1`, fox)
+	require.NoError(t, err)
+
+	active, err := st.Nicknames(ctx, plain)
+	require.NoError(t, err)
+	assert.NotContains(t, labels(active), fox)
+}
+
+func TestNicknameLabelMustFitACallback(t *testing.T) {
+	st, ctx := open(t)
+	_ = st
+
+	// "nick:" takes five of Telegram's 64 callback_data bytes, so 59 is the limit.
+	_, err := probe(ctx, t).Exec(ctx,
+		`INSERT INTO nicknames (code, label) VALUES ('toolong', $1)`, strings.Repeat("я", 30))
+	require.Error(t, err, "the schema refuses a label that could not be put on a button")
+	assert.Contains(t, err.Error(), "nicknames_label_check")
+}
+
+func TestAchievementsAndActivity(t *testing.T) {
+	st, ctx := open(t)
+
+	const user = int64(10_012)
+
+	_, err := st.EnsureUser(ctx, user)
+	require.NoError(t, err)
+
+	empty, err := st.Achievements(ctx, user)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+
+	activity, err := st.Activity(ctx, user)
+	require.NoError(t, err)
+	assert.Equal(t, profile.Activity{}, activity)
+
+	conn := probe(ctx, t)
+
+	var achievementID int64
+	require.NoError(t, conn.QueryRow(ctx,
+		`INSERT INTO achievements (code, title, description) VALUES ('first', 'Первый', 'За первый комментарий')
+		 RETURNING id`).Scan(&achievementID))
+	_, err = conn.Exec(ctx,
+		`INSERT INTO user_achievements (user_id, achievement_id) VALUES ($1, $2)`, user, achievementID)
+	require.NoError(t, err)
+
+	got, err := st.Achievements(ctx, user)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, profile.Achievement{Code: "first", Title: "Первый", Description: "За первый комментарий"}, got[0])
+
+	// Two published comments and one published reply; a failed one is not counted.
+	top := mustPublish(ctx, t, st, user, 0, 8801)
+	mustPublish(ctx, t, st, user, 0, 8802)
+	mustPublish(ctx, t, st, user, top, 8803)
+
+	failed, err := st.CreateComment(ctx, comment.Comment{
+		UserID: user, PostID: 4242, Nickname: fox,
+		Text: "не ушло", Status: comment.StatusPending, CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, st.MarkCommentFailed(ctx, failed))
+
+	activity, err = st.Activity(ctx, user)
+	require.NoError(t, err)
+	assert.Equal(t, profile.Activity{Comments: 2, Replies: 1}, activity)
+}
+
+// mustPublish creates a published comment and returns its id.
+func mustPublish(ctx context.Context, t *testing.T, st *storage.Storage, user, parent int64, messageID int) int64 {
+	t.Helper()
+
+	id, err := st.CreateComment(ctx, comment.Comment{
+		UserID: user, PostID: 4242, Nickname: fox, ReplyToCommentID: parent,
+		Text: "текст", Status: comment.StatusPending, CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, st.MarkCommentPublished(ctx, id, messageID))
+
+	return id
+}
+
+func labels(nicknames []comment.Nickname) []string {
+	out := make([]string, 0, len(nicknames))
+	for _, n := range nicknames {
+		out = append(out, n.Label)
+	}
+
+	return out
+}
+
+func TestActiveRulesAndGrant(t *testing.T) {
+	st, ctx := open(t)
+
+	const user = int64(10_013)
+
+	_, err := st.EnsureUser(ctx, user)
+	require.NoError(t, err)
+
+	none, err := st.ActiveRules(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+
+	conn := probe(ctx, t)
+
+	var achievementID int64
+	require.NoError(t, conn.QueryRow(ctx,
+		`INSERT INTO achievements (code, title) VALUES ('night', 'Полуночник') RETURNING id`).Scan(&achievementID))
+
+	_, err = conn.Exec(ctx, `
+INSERT INTO achievement_rules (achievement_id, after_hour, before_hour, min_length, upper_only, pattern, min_comments)
+VALUES ($1, 23, 5, 10, TRUE, '(?i)котик', 3)`, achievementID)
+	require.NoError(t, err)
+
+	// An inactive rule is invisible to the awarder.
+	_, err = conn.Exec(ctx,
+		`INSERT INTO achievement_rules (achievement_id, min_length, is_active) VALUES ($1, 1, FALSE)`,
+		achievementID)
+	require.NoError(t, err)
+
+	rules, err := st.ActiveRules(ctx)
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+
+	got := rules[0]
+	assert.Equal(t, achievementID, got.AchievementID)
+	assert.Equal(t, "night", got.AchievementCode)
+	assert.Equal(t, "Полуночник", got.AchievementTitle)
+	require.NotNil(t, got.AfterHour)
+	assert.Equal(t, 23, *got.AfterHour)
+	require.NotNil(t, got.BeforeHour)
+	assert.Equal(t, 5, *got.BeforeHour)
+	require.NotNil(t, got.MinLength)
+	assert.Equal(t, 10, *got.MinLength)
+	require.NotNil(t, got.UpperOnly)
+	assert.True(t, *got.UpperOnly)
+	assert.Equal(t, "(?i)котик", got.Pattern)
+	require.NotNil(t, got.MinComments)
+	assert.Equal(t, 3, *got.MinComments)
+
+	// Columns left out stay nil, which is how "not checked" is expressed.
+	assert.Nil(t, got.MaxLength)
+	assert.Nil(t, got.MinReplies)
+	assert.Nil(t, got.MinPosts)
+	assert.Nil(t, got.MinAchievements)
+
+	fresh, err := st.Grant(ctx, user, achievementID)
+	require.NoError(t, err)
+	assert.True(t, fresh)
+
+	again, err := st.Grant(ctx, user, achievementID)
+	require.NoError(t, err)
+	assert.False(t, again, "a rule that keeps matching must not hand out the same reward twice")
+}
+
+func TestCountersFeedTheRules(t *testing.T) {
+	st, ctx := open(t)
+
+	const user = int64(10_014)
+
+	_, err := st.EnsureUser(ctx, user)
+	require.NoError(t, err)
+
+	empty, err := st.Counters(ctx, user)
+	require.NoError(t, err)
+	assert.Equal(t, achievement.Counters{}, empty)
+
+	top := mustPublish(ctx, t, st, user, 0, 8810)
+	mustPublish(ctx, t, st, user, top, 8811)
+
+	conn := probe(ctx, t)
+
+	var achievementID int64
+	require.NoError(t, conn.QueryRow(ctx,
+		`INSERT INTO achievements (code, title) VALUES ('first', 'Первый') RETURNING id`).Scan(&achievementID))
+	_, err = conn.Exec(ctx,
+		`INSERT INTO user_achievements (user_id, achievement_id) VALUES ($1, $2)`, user, achievementID)
+	require.NoError(t, err)
+
+	// Approved suggestions count as posts; the flow does not exist yet, so a row
+	// is written by hand to prove the query reads the right column.
+	_, err = conn.Exec(ctx,
+		`INSERT INTO suggested_posts (user_id, content_text, status) VALUES ($1, 'текст', 'approved')`, user)
+	require.NoError(t, err)
+	_, err = conn.Exec(ctx,
+		`INSERT INTO suggested_posts (user_id, content_text, status) VALUES ($1, 'текст', 'pending')`, user)
+	require.NoError(t, err)
+
+	got, err := st.Counters(ctx, user)
+	require.NoError(t, err)
+	assert.Equal(t, achievement.Counters{Comments: 1, Replies: 1, Posts: 1, Achievements: 1}, got)
+}
+
+func TestRuleWithNoConditionIsRefused(t *testing.T) {
+	st, ctx := open(t)
+	_ = st
+
+	conn := probe(ctx, t)
+
+	var achievementID int64
+	require.NoError(t, conn.QueryRow(ctx,
+		`INSERT INTO achievements (code, title) VALUES ('empty', 'Пустое') RETURNING id`).Scan(&achievementID))
+
+	// Such a rule would fire on every comment ever published.
+	_, err := conn.Exec(ctx, `INSERT INTO achievement_rules (achievement_id) VALUES ($1)`, achievementID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "achievement_rules_not_empty")
+
+	// Half an hour window is meaningless too.
+	_, err = conn.Exec(ctx,
+		`INSERT INTO achievement_rules (achievement_id, after_hour) VALUES ($1, 23)`, achievementID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "achievement_rules_hours_paired")
 }

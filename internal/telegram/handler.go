@@ -11,12 +11,15 @@ import (
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
+	"loudbot/internal/achievement"
 	"loudbot/internal/comment"
 	"loudbot/internal/config"
+	"loudbot/internal/profile"
 )
 
 const (
-	startCommand = "/start"
+	startCommand   = "/start"
+	profileCommand = "/profile"
 	// quoteLimit keeps the quoted post short enough to stay a hint rather than a
 	// wall of text above the author's own message.
 	quoteLimit = 280
@@ -103,11 +106,18 @@ func (b *Bot) onPrivateMessage(ctx context.Context, msg *models.Message) {
 		return
 	}
 
-	// A deep link opens a new flow, so the previous conversation goes first —
-	// including the "/start" Telegram made the user send to get here.
+	// A deep link or a command opens a new flow, so the previous conversation goes
+	// first — including the "/start" Telegram made the user send to get here.
 	if payload, ok := startPayload(msg.Text); ok {
 		b.wipe(ctx, msg.From.ID, msg.ID)
 		b.onStart(ctx, msg, payload)
+
+		return
+	}
+
+	if strings.TrimSpace(msg.Text) == profileCommand {
+		b.wipe(ctx, msg.From.ID, msg.ID)
+		b.onProfile(ctx, msg)
 
 		return
 	}
@@ -221,6 +231,61 @@ func (b *Bot) onComment(ctx context.Context, msg *models.Message) {
 	}
 }
 
+// onProfile shows what the author has earned and what it unlocked.
+func (b *Bot) onProfile(ctx context.Context, msg *models.Message) {
+	userID := msg.From.ID
+
+	got, err := b.profiles.Get(ctx, userID)
+	if err != nil {
+		b.log.Error("build profile", slog.Int64("user_id", userID), slog.Any("error", err))
+		b.reply(ctx, msg.Chat.ID, b.cfg.Messages.Errors.Internal)
+
+		return
+	}
+
+	sent, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID:    msg.Chat.ID,
+		Text:      profileText(got, b.cfg.Messages.Profile),
+		ParseMode: models.ParseModeHTML,
+	})
+	if err != nil {
+		b.log.Error("send profile", slog.Int64("user_id", userID), slog.Any("error", err))
+
+		return
+	}
+
+	b.remember(ctx, userID, sent.ID)
+}
+
+// profileText renders the /profile screen. Everything a person or an operator
+// wrote is escaped: titles and masks come from the database.
+func profileText(p profile.Profile, m config.Profile) string {
+	var b strings.Builder
+
+	b.WriteString("<b>" + html.EscapeString(m.Title) + "</b>\n\n")
+	b.WriteString(html.EscapeString(fmt.Sprintf(m.Activity, p.Activity.Comments, p.Activity.Replies)))
+
+	b.WriteString("\n\n<b>" + html.EscapeString(m.AchievementsHead) + "</b>\n")
+	if len(p.Achievements) == 0 {
+		b.WriteString(html.EscapeString(m.NoAchievements) + "\n")
+	}
+
+	for _, a := range p.Achievements {
+		b.WriteString("• " + html.EscapeString(a.Title))
+		if a.Description != "" {
+			b.WriteString(" — " + html.EscapeString(a.Description))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n<b>" + html.EscapeString(m.NicknamesHead) + "</b>\n")
+	for _, n := range p.Nicknames {
+		b.WriteString("• " + html.EscapeString(n.Label) + "\n")
+	}
+
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func (b *Bot) onCallback(ctx context.Context, query *models.CallbackQuery) {
 	switch {
 	case query.Data == comment.CancelCallback:
@@ -260,6 +325,32 @@ func (b *Bot) onNicknameChosen(ctx context.Context, query *models.CallbackQuery)
 	// The keyboard has done its job; turning it into the confirmation keeps the
 	// private chat from filling up with dead buttons.
 	b.replacePrompt(ctx, query, b.cfg.Messages.Published)
+
+	b.award(ctx, published)
+}
+
+// award is the one place a published comment is checked for achievements; every
+// trigger lives in internal/achievement, none of it here.
+func (b *Bot) award(ctx context.Context, published comment.Comment) {
+	granted, err := b.awards.Award(ctx, achievement.Event{
+		UserID:  published.UserID,
+		Text:    published.Text,
+		At:      published.CreatedAt,
+		IsReply: published.ReplyToCommentID != 0,
+	})
+	if err != nil {
+		// The comment is already in the channel; a failure here must not look
+		// like the comment failed.
+		b.log.Error("award achievements",
+			slog.Int64("user_id", published.UserID),
+			slog.Int64("comment_id", published.ID),
+			slog.Any("error", err),
+		)
+	}
+
+	for _, a := range granted {
+		b.reply(ctx, published.UserID, fmt.Sprintf(b.cfg.Messages.Achievement, a.Title))
+	}
 }
 
 // onCancel drops the staged message, taking both it and the keyboard off-screen.

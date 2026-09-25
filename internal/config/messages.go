@@ -23,9 +23,23 @@ type Messages struct {
 	ReplyPrompt    string `toml:"reply_prompt"`
 	ChooseNickname string `toml:"choose_nickname"`
 	Published      string `toml:"published"`
-	Cancelled      string `toml:"cancelled"`
+	// Achievement is shown when a comment earns one; it takes the title.
+	Achievement string `toml:"achievement"`
+	Cancelled   string `toml:"cancelled"`
+
+	// Profile is the /profile screen. Counters and lists are filled into it.
+	Profile Profile `toml:"profile"`
 
 	Errors Errors `toml:"errors"`
+}
+
+// Profile is the wording of the /profile screen.
+type Profile struct {
+	Title            string `toml:"title"`
+	Activity         string `toml:"activity"`
+	AchievementsHead string `toml:"achievements_head"`
+	NoAchievements   string `toml:"no_achievements"`
+	NicknamesHead    string `toml:"nicknames_head"`
 }
 
 // Errors is what an author is told when the bot refuses their message. Nothing
@@ -63,7 +77,16 @@ func DefaultMessages() Messages {
 		ReplyPrompt:    "Напишите ответ — текстом или медиа.",
 		ChooseNickname: "Под каким псевдонимом отправить?",
 		Published:      "Комментарий отправлен.",
+		Achievement:    "🏅 Новое достижение: %s",
 		Cancelled:      "Черновик удалён. Напишите новый комментарий.",
+
+		Profile: Profile{
+			Title:            "Ваша статистика",
+			Activity:         "Комментариев: %d, ответов: %d",
+			AchievementsHead: "Достижения",
+			NoAchievements:   "Пока ни одного. Они открывают новые псевдонимы.",
+			NicknamesHead:    "Доступные псевдонимы",
+		},
 
 		Errors: Errors{
 			Banned:         "Вы не можете оставлять комментарии.",
@@ -87,30 +110,35 @@ func DefaultMessages() Messages {
 // unusable control rather than fall back to the default.
 func (m Messages) validate() []error {
 	named := map[string]string{
-		"messages.button_comment":         m.ButtonComment,
-		"messages.button_open_post":       m.ButtonOpenPost,
-		"messages.button_cancel":          m.ButtonCancel,
-		"messages.reply_link":             m.ReplyLink,
-		"messages.invite":                 m.Invite,
-		"messages.help":                   m.Help,
-		"messages.prompt":                 m.Prompt,
-		"messages.reply_prompt":           m.ReplyPrompt,
-		"messages.choose_nickname":        m.ChooseNickname,
-		"messages.published":              m.Published,
-		"messages.cancelled":              m.Cancelled,
-		"messages.errors.banned":          m.Errors.Banned,
-		"messages.errors.bad_payload":     m.Errors.BadPayload,
-		"messages.errors.unknown_post":    m.Errors.UnknownPost,
-		"messages.errors.unknown_comment": m.Errors.UnknownComment,
-		"messages.errors.no_nicknames":    m.Errors.NoNicknames,
-		"messages.errors.no_draft":        m.Errors.NoDraft,
-		"messages.errors.draft_expired":   m.Errors.DraftExpired,
-		"messages.errors.nickname":        m.Errors.Nickname,
-		"messages.errors.empty":           m.Errors.Empty,
-		"messages.errors.too_long":        m.Errors.TooLong,
-		"messages.errors.nothing_staged":  m.Errors.NothingStaged,
-		"messages.errors.unsupported":     m.Errors.Unsupported,
-		"messages.errors.internal":        m.Errors.Internal,
+		"messages.button_comment":            m.ButtonComment,
+		"messages.button_open_post":          m.ButtonOpenPost,
+		"messages.button_cancel":             m.ButtonCancel,
+		"messages.reply_link":                m.ReplyLink,
+		"messages.invite":                    m.Invite,
+		"messages.help":                      m.Help,
+		"messages.prompt":                    m.Prompt,
+		"messages.reply_prompt":              m.ReplyPrompt,
+		"messages.choose_nickname":           m.ChooseNickname,
+		"messages.published":                 m.Published,
+		"messages.cancelled":                 m.Cancelled,
+		"messages.profile.title":             m.Profile.Title,
+		"messages.profile.activity":          m.Profile.Activity,
+		"messages.profile.achievements_head": m.Profile.AchievementsHead,
+		"messages.profile.no_achievements":   m.Profile.NoAchievements,
+		"messages.profile.nicknames_head":    m.Profile.NicknamesHead,
+		"messages.errors.banned":             m.Errors.Banned,
+		"messages.errors.bad_payload":        m.Errors.BadPayload,
+		"messages.errors.unknown_post":       m.Errors.UnknownPost,
+		"messages.errors.unknown_comment":    m.Errors.UnknownComment,
+		"messages.errors.no_nicknames":       m.Errors.NoNicknames,
+		"messages.errors.no_draft":           m.Errors.NoDraft,
+		"messages.errors.draft_expired":      m.Errors.DraftExpired,
+		"messages.errors.nickname":           m.Errors.Nickname,
+		"messages.errors.empty":              m.Errors.Empty,
+		"messages.errors.too_long":           m.Errors.TooLong,
+		"messages.errors.nothing_staged":     m.Errors.NothingStaged,
+		"messages.errors.unsupported":        m.Errors.Unsupported,
+		"messages.errors.internal":           m.Errors.Internal,
 	}
 
 	var errs []error

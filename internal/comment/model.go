@@ -39,10 +39,9 @@ type User struct {
 	LastNickname string
 }
 
-// Nickname is one entry of the curated mask list. The list lives in config.toml,
-// not in the database: editing it is a config change and a restart, no migration.
-// Label is the identity — it is what gets stored on a published comment, so a mask
-// later dropped from the config does not rewrite messages already in the channel.
+// Nickname is one entry of the curated mask list. Label is the identity — it is
+// what gets stored on a published comment, so retiring or renaming a mask does
+// not rewrite messages already in the channel.
 type Nickname struct {
 	Label string
 }
@@ -112,6 +111,9 @@ type Comment struct {
 // ErrNotFound (wrapped or bare) when a row is missing.
 type Repository interface {
 	EnsureUser(ctx context.Context, userID int64) (User, error)
+	// Nicknames are the masks this user may wear: the public ones, plus any
+	// unlocked by an achievement they hold.
+	Nicknames(ctx context.Context, userID int64) ([]Nickname, error)
 	SetLastNickname(ctx context.Context, userID int64, nickname string) error
 
 	LinkPost(ctx context.Context, post Post) error

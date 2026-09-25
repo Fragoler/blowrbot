@@ -23,6 +23,8 @@ type fakeRepo struct {
 	nextCommentID int64
 
 	ensureUserErr  error
+	nicknamesErr   error
+	nicknames      []comment.Nickname
 	postErr        error
 	linkPostErr    error
 	markInviteErr  error
@@ -86,6 +88,23 @@ func (r *fakeRepo) EnsureUser(_ context.Context, userID int64) (comment.User, er
 	}
 
 	return user, nil
+}
+
+// Nicknames stands in for the masks this user has unlocked.
+func (r *fakeRepo) Nicknames(_ context.Context, _ int64) ([]comment.Nickname, error) {
+	r.record("Nicknames")
+
+	if r.nicknamesErr != nil {
+		return nil, r.nicknamesErr
+	}
+
+	return r.nicknames, nil
+}
+
+func (r *fakeRepo) withNicknames(nicknames ...comment.Nickname) *fakeRepo {
+	r.nicknames = nicknames
+
+	return r
 }
 
 func (r *fakeRepo) SetLastNickname(_ context.Context, userID int64, nickname string) error {

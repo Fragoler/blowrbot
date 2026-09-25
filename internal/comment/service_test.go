@@ -33,7 +33,6 @@ func testOptions() comment.Options {
 		BotUsername:   "anon_bot",
 		ReplyLinkText: "ответить",
 		ChannelID:     channelID,
-		Nicknames:     []comment.Nickname{fox, owl},
 		MaxTextLen:    10,
 		DraftTTL:      time.Hour,
 	}
@@ -60,7 +59,7 @@ func testPost() comment.Post {
 
 // fullRepo is the happy-path world: an active user and a post with a thread.
 func fullRepo() *fakeRepo {
-	return newRepo().withUser(comment.User{ID: userID}).withPost(testPost())
+	return newRepo().withUser(comment.User{ID: userID}).withPost(testPost()).withNicknames(fox, owl)
 }
 
 // openDraft is a draft bound to the post with nothing written yet.
@@ -120,9 +119,8 @@ func TestStartErrors(t *testing.T) {
 			wantErr: comment.ErrUnknownPost,
 		},
 		{
-			name:    "no masks configured",
-			repo:    fullRepo,
-			opts:    func(o *comment.Options) { o.Nicknames = nil },
+			name:    "user has unlocked no masks",
+			repo:    func() *fakeRepo { return fullRepo().withNicknames() },
 			payload: "comment_42",
 			wantErr: comment.ErrNoNicknames,
 		},
@@ -275,8 +273,10 @@ func TestStageErrors(t *testing.T) {
 			wantErr: comment.ErrTextTooLong,
 		},
 		{
-			name:    "post deleted while composing",
-			repo:    func() *fakeRepo { return newRepo().withUser(comment.User{ID: userID}).withDraft(openDraft()) },
+			name: "post deleted while composing",
+			repo: func() *fakeRepo {
+				return newRepo().withUser(comment.User{ID: userID}).withNicknames(fox, owl).withDraft(openDraft())
+			},
 			req:     comment.StageRequest{UserID: userID, MessageID: 1, Text: "hi"},
 			wantErr: comment.ErrUnknownPost,
 		},
@@ -392,7 +392,7 @@ func TestPublishErrors(t *testing.T) {
 			wantErr: comment.ErrNothingStaged,
 		},
 		{
-			name:    "mask not in the config list",
+			name:    "mask not available to this user",
 			repo:    func() *fakeRepo { return fullRepo().withDraft(stagedDraft()) },
 			label:   "Мамонт",
 			wantErr: comment.ErrNicknameUnavailable,
@@ -406,8 +406,10 @@ func TestPublishErrors(t *testing.T) {
 			wantErr: comment.ErrBanned,
 		},
 		{
-			name:    "post deleted while composing",
-			repo:    func() *fakeRepo { return newRepo().withUser(comment.User{ID: userID}).withDraft(stagedDraft()) },
+			name: "post deleted while composing",
+			repo: func() *fakeRepo {
+				return newRepo().withUser(comment.User{ID: userID}).withNicknames(fox, owl).withDraft(stagedDraft())
+			},
 			label:   fox.Label,
 			wantErr: comment.ErrUnknownPost,
 		},
@@ -518,7 +520,6 @@ func TestDefaultsAreApplied(t *testing.T) {
 	svc := comment.New(repo, pub, nil, comment.Options{
 		BotUsername:   "anon_bot",
 		ReplyLinkText: "ответить",
-		Nicknames:     []comment.Nickname{fox, owl},
 	})
 	svc.SetClock(func() time.Time { return now })
 
@@ -532,16 +533,33 @@ func TestNicknames(t *testing.T) {
 
 	svc := newService(t, fullRepo(), &fakePublisher{}, nil)
 
-	got, err := svc.Nicknames()
+	ctx := context.Background()
+
+	got, err := svc.Nicknames(ctx, userID)
 	require.NoError(t, err)
 	assert.Equal(t, []comment.Nickname{fox, owl}, got)
 
-	found, err := svc.Nickname(owl.Label)
+	found, err := svc.Nickname(ctx, userID, owl.Label)
 	require.NoError(t, err)
 	assert.Equal(t, owl, found)
 
-	_, err = svc.Nickname("Мамонт")
+	_, err = svc.Nickname(ctx, userID, "Мамонт")
 	require.ErrorIs(t, err, comment.ErrNicknameUnavailable)
+}
+
+func TestNicknameRefusesAMaskTheUserHasNotUnlocked(t *testing.T) {
+	t.Parallel()
+
+	// The label travels back from the client in callback_data, so a locked mask
+	// must be refused at publish time, not merely left off the keyboard.
+	draft := stagedDraft()
+	repo := fullRepo().withNicknames(fox).withDraft(draft)
+	pub := &fakePublisher{result: comment.PublishResult{MessageID: 1}}
+	svc := newService(t, repo, pub, nil)
+
+	_, err := svc.Publish(context.Background(), userID, owl.Label)
+	require.ErrorIs(t, err, comment.ErrNicknameUnavailable)
+	assert.Empty(t, pub.requests, "a locked mask never reaches the group")
 }
 
 func TestServiceDeepLinkUsesConfiguredUsername(t *testing.T) {
@@ -554,7 +572,7 @@ func TestServiceDeepLinkUsesConfiguredUsername(t *testing.T) {
 func TestOnPostPublishedLinksAndInvites(t *testing.T) {
 	t.Parallel()
 
-	repo := newRepo()
+	repo := newRepo().withNicknames(fox, owl)
 	pub := &fakePublisher{inviteResult: comment.PublishResult{MessageID: 4321}}
 	svc := newService(t, repo, pub, nil)
 
@@ -576,7 +594,7 @@ func TestOnPostPublishedLinksAndInvites(t *testing.T) {
 func TestOnPostPublishedIsIdempotent(t *testing.T) {
 	t.Parallel()
 
-	repo := newRepo()
+	repo := newRepo().withNicknames(fox, owl)
 	pub := &fakePublisher{inviteResult: comment.PublishResult{MessageID: 4321}}
 	svc := newService(t, repo, pub, nil)
 
@@ -695,7 +713,10 @@ func TestStartReplyErrors(t *testing.T) {
 		{
 			name: "post gone while the link was open",
 			repo: func() *fakeRepo {
-				return newRepo().withUser(comment.User{ID: userID}).withComment(publishedComment())
+				return newRepo().
+					withUser(comment.User{ID: userID}).
+					withNicknames(fox, owl).
+					withComment(publishedComment())
 			},
 			wantErr: comment.ErrUnknownPost,
 		},

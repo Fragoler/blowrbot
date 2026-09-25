@@ -12,10 +12,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	// The zone database goes into the binary: the runtime image ships no tzdata,
+	// and service.timezone must resolve there.
+	_ "time/tzdata"
 
 	"github.com/pelletier/go-toml/v2"
-
-	"loudbot/internal/comment"
 )
 
 const (
@@ -45,20 +46,30 @@ type Config struct {
 	Moderation Moderation `toml:"moderation"`
 	Comments   Comments   `toml:"comments"`
 	Messages   Messages   `toml:"messages"`
-	// Nicknames is the curated mask list. It lives here rather than in the
-	// database so that editing it is a config change and a restart, no migration.
-	Nicknames []Nickname `toml:"nicknames"`
-}
-
-// Nickname is one entry of the mask list. Label is the identity: it is stored on
-// every published comment, so renaming one here does not rewrite old messages.
-type Nickname struct {
-	Label string `toml:"label"`
 }
 
 type Service struct {
 	Name     string `toml:"name"`
 	LogLevel string `toml:"log_level"`
+	// Timezone is the zone achievement rules read the clock in, e.g. the hour
+	// window of a "wrote at night" rule. Empty means UTC.
+	Timezone string `toml:"timezone"`
+}
+
+// Location resolves Timezone. The zone database is embedded (see the blank
+// time/tzdata import below), so this works in a container without tzdata.
+func (s Service) Location() (*time.Location, error) {
+	name := strings.TrimSpace(s.Timezone)
+	if name == "" {
+		return time.UTC, nil
+	}
+
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		return nil, fmt.Errorf("service.timezone=%q: %w", s.Timezone, err)
+	}
+
+	return loc, nil
 }
 
 type Telegram struct {
@@ -223,55 +234,17 @@ func (c Config) Validate() error {
 		errs = append(errs, err)
 	}
 
-	errs = append(errs, c.validateNicknames()...)
 	errs = append(errs, c.Messages.validate()...)
 
 	if _, err := parseLevel(c.Service.LogLevel); err != nil {
 		errs = append(errs, err)
 	}
 
+	if _, err := c.Service.Location(); err != nil {
+		errs = append(errs, err)
+	}
+
 	return errors.Join(errs...)
-}
-
-// validateNicknames rejects a list the bot could not actually offer: an empty one,
-// blank or duplicated labels, or a label too long to survive Telegram's 64-byte
-// callback_data limit once it is put on a button.
-func (c Config) validateNicknames() []error {
-	if len(c.Nicknames) == 0 {
-		return []error{errors.New("at least one [[nicknames]] entry is required")}
-	}
-
-	var (
-		errs []error
-		seen = make(map[string]struct{}, len(c.Nicknames))
-	)
-
-	for i, n := range c.Nicknames {
-		label := strings.TrimSpace(n.Label)
-
-		switch {
-		case label == "":
-			errs = append(errs, fmt.Errorf("nicknames[%d].label is empty", i))
-
-			continue
-		case label != n.Label:
-			errs = append(errs, fmt.Errorf("nicknames[%d].label=%q has leading or trailing spaces", i, n.Label))
-		}
-
-		if _, dup := seen[label]; dup {
-			errs = append(errs, fmt.Errorf("nicknames[%d].label=%q is a duplicate", i, label))
-		}
-		seen[label] = struct{}{}
-
-		if !comment.NicknameCallbackFits(label) {
-			errs = append(errs, fmt.Errorf(
-				"nicknames[%d].label=%q is too long: %d bytes, and a button carries it within %d",
-				i, label, len(label), comment.MaxCallbackLen,
-			))
-		}
-	}
-
-	return errs
 }
 
 // LogLevel maps service.log_level onto slog; an unparsable value falls back to info

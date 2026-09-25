@@ -10,9 +10,11 @@ import (
 
 	tgbot "github.com/go-telegram/bot"
 
+	"loudbot/internal/achievement"
 	"loudbot/internal/chatlog"
 	"loudbot/internal/comment"
 	"loudbot/internal/config"
+	"loudbot/internal/profile"
 )
 
 // Bot wires the Telegram client to the comment core.
@@ -21,6 +23,8 @@ type Bot struct {
 	cfg      config.Config
 	log      *slog.Logger
 	comments *comment.Service
+	profiles *profile.Service
+	awards   *achievement.Awarder
 	history  *chatlog.Log
 }
 
@@ -78,10 +82,28 @@ func (b *Bot) UseComments(svc *comment.Service) {
 	b.comments = svc
 }
 
+// UseProfiles attaches the achievements core behind /profile.
+func (b *Bot) UseProfiles(svc *profile.Service) {
+	b.profiles = svc
+}
+
+// UseAwarder attaches the layer that hands out achievements automatically.
+func (b *Bot) UseAwarder(a *achievement.Awarder) {
+	b.awards = a
+}
+
 // Run starts long polling and blocks until the context is cancelled.
 func (b *Bot) Run(ctx context.Context) error {
 	if b.comments == nil {
 		return errors.New("comment service is not attached")
+	}
+
+	if b.profiles == nil {
+		return errors.New("profile service is not attached")
+	}
+
+	if b.awards == nil {
+		return errors.New("awarder is not attached")
 	}
 
 	me, err := b.api.GetMe(ctx)

@@ -11,8 +11,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"loudbot/internal/achievement"
 	"loudbot/internal/comment"
 	"loudbot/internal/config"
+	"loudbot/internal/profile"
 )
 
 type Storage struct {
@@ -377,4 +379,159 @@ func int32s(ids []int) []int32 {
 	}
 
 	return out
+}
+
+// Nicknames are the masks a user may wear: the public ones — those no achievement
+// points at — plus any unlocked by an achievement they hold.
+func (s *Storage) Nicknames(ctx context.Context, userID int64) ([]comment.Nickname, error) {
+	const q = `
+SELECT n.label
+FROM nicknames n
+WHERE n.is_active
+  AND (
+    NOT EXISTS (SELECT 1 FROM achievement_nicknames an WHERE an.nickname_id = n.id)
+    OR EXISTS (
+      SELECT 1
+      FROM achievement_nicknames an
+      JOIN user_achievements ua ON ua.achievement_id = an.achievement_id
+      WHERE an.nickname_id = n.id AND ua.user_id = $1
+    )
+  )
+ORDER BY n.id`
+
+	rows, err := s.pool.Query(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list nicknames: %w", err)
+	}
+	defer rows.Close()
+
+	var out []comment.Nickname
+	for rows.Next() {
+		var n comment.Nickname
+		if err := rows.Scan(&n.Label); err != nil {
+			return nil, fmt.Errorf("scan nickname: %w", err)
+		}
+		out = append(out, n)
+	}
+
+	return out, rows.Err()
+}
+
+// Achievements lists what a user has been granted, oldest first.
+func (s *Storage) Achievements(ctx context.Context, userID int64) ([]profile.Achievement, error) {
+	const q = `
+SELECT a.code, a.title, a.description
+FROM user_achievements ua
+JOIN achievements a ON a.id = ua.achievement_id
+WHERE ua.user_id = $1
+ORDER BY ua.granted_at, a.id`
+
+	rows, err := s.pool.Query(ctx, q, userID)
+	if err != nil {
+		return nil, fmt.Errorf("list achievements: %w", err)
+	}
+	defer rows.Close()
+
+	var out []profile.Achievement
+	for rows.Next() {
+		var a profile.Achievement
+		if err := rows.Scan(&a.Code, &a.Title, &a.Description); err != nil {
+			return nil, fmt.Errorf("scan achievement: %w", err)
+		}
+		out = append(out, a)
+	}
+
+	return out, rows.Err()
+}
+
+// Activity counts what a user has published, replies told apart from comments.
+func (s *Storage) Activity(ctx context.Context, userID int64) (profile.Activity, error) {
+	const q = `
+SELECT
+    count(*) FILTER (WHERE reply_to_comment_id IS NULL),
+    count(*) FILTER (WHERE reply_to_comment_id IS NOT NULL)
+FROM comments
+WHERE user_id = $1 AND status = $2`
+
+	var a profile.Activity
+	if err := s.pool.QueryRow(ctx, q, userID, comment.StatusPublished).Scan(&a.Comments, &a.Replies); err != nil {
+		return profile.Activity{}, fmt.Errorf("count activity: %w", err)
+	}
+
+	return a, nil
+}
+
+// ActiveRules reads the auto-grant rules in force. It runs on every published
+// comment, so a rule edited in the database takes effect without a restart.
+func (s *Storage) ActiveRules(ctx context.Context) ([]achievement.Rule, error) {
+	const q = `
+SELECT r.id, r.achievement_id, a.code, a.title,
+       r.after_hour, r.before_hour,
+       r.min_length, r.max_length, r.upper_only, COALESCE(r.pattern, ''),
+       r.min_comments, r.min_replies, r.min_posts, r.min_achievements
+FROM achievement_rules r
+JOIN achievements a ON a.id = r.achievement_id
+WHERE r.is_active
+ORDER BY r.id`
+
+	rows, err := s.pool.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("list achievement rules: %w", err)
+	}
+	defer rows.Close()
+
+	var out []achievement.Rule
+	for rows.Next() {
+		var r achievement.Rule
+		err := rows.Scan(
+			&r.ID, &r.AchievementID, &r.AchievementCode, &r.AchievementTitle,
+			&r.AfterHour, &r.BeforeHour,
+			&r.MinLength, &r.MaxLength, &r.UpperOnly, &r.Pattern,
+			&r.MinComments, &r.MinReplies, &r.MinPosts, &r.MinAchievements,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan achievement rule: %w", err)
+		}
+		out = append(out, r)
+	}
+
+	return out, rows.Err()
+}
+
+// Counters are the totals the rules compare against. Posts counts approved
+// suggestions, which stays zero until that flow exists.
+func (s *Storage) Counters(ctx context.Context, userID int64) (achievement.Counters, error) {
+	const q = `
+SELECT
+    (SELECT count(*) FROM comments
+      WHERE user_id = $1 AND status = $2 AND reply_to_comment_id IS NULL),
+    (SELECT count(*) FROM comments
+      WHERE user_id = $1 AND status = $2 AND reply_to_comment_id IS NOT NULL),
+    (SELECT count(*) FROM suggested_posts WHERE user_id = $1 AND status = 'approved'),
+    (SELECT count(*) FROM user_achievements WHERE user_id = $1)`
+
+	var c achievement.Counters
+	err := s.pool.QueryRow(ctx, q, userID, comment.StatusPublished).
+		Scan(&c.Comments, &c.Replies, &c.Posts, &c.Achievements)
+	if err != nil {
+		return achievement.Counters{}, fmt.Errorf("count achievement inputs: %w", err)
+	}
+
+	return c, nil
+}
+
+// Grant records an achievement and reports whether it was new; a rule that keeps
+// matching must not hand out the same reward twice.
+func (s *Storage) Grant(ctx context.Context, userID, achievementID int64) (bool, error) {
+	const q = `
+INSERT INTO user_achievements (user_id, achievement_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING`
+
+	tag, err := s.pool.Exec(ctx, q, userID, achievementID)
+	if err != nil {
+		return false, fmt.Errorf("grant achievement %d: %w", achievementID, err)
+	}
+
+	return tag.RowsAffected() > 0, nil
 }

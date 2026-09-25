@@ -4,6 +4,7 @@
 [service]
 name = "loudbot"
 log_level = "info"          # debug | info | warn | error
+timezone = "Europe/Moscow"  # the clock achievement rules read; empty means UTC
 
 [telegram]
 mode = "polling"            # webhook — when there is time for TLS
@@ -27,28 +28,6 @@ chat_id = -1001111111111    # private moderators chat
 max_text_len = 3500
 draft_ttl = "1h"          # how long a "comment" tap stays valid
 
-# The curated mask list. Editing it is a config change and a restart — no
-# migration. A label is stored on every comment published under it, so renaming
-# one here does not rewrite messages already in the channel. A label must fit
-# Telegram's 64-byte callback_data limit once "nick:" is prepended.
-[[nicknames]]
-label = "Лис"
-
-[[nicknames]]
-label = "Сова"
-
-[[nicknames]]
-label = "Ёж"
-
-[[nicknames]]
-label = "Кит"
-
-[[nicknames]]
-label = "Барсук"
-
-[[nicknames]]
-label = "Выдра"
-
 # Every line the bot shows a person. Each key is optional: leave one out and the
 # built-in Russian wording is used. An empty string is rejected at startup — it
 # would render as a blank button rather than fall back.
@@ -63,7 +42,15 @@ prompt = "Напишите комментарий к посту — тексто
 reply_prompt = "Напишите ответ — текстом или медиа."
 choose_nickname = "Под каким псевдонимом отправить?"
 published = "Комментарий отправлен."
+achievement = "🏅 Получено новое достижение: %s"     # takes the achievement title
 cancelled = "Черновик удалён. Напишите новый комментарий."
+
+[messages.profile]
+title = "Ваша статистика"
+activity = "Комментариев: %d, ответов: %d"   # counts in this order
+achievements_head = "Достижения"
+no_achievements = "Пока ни одного. Они открывают новые псевдонимы."
+nicknames_head = "Доступные псевдонимы"
 
 [messages.errors]
 banned = "Вы не можете оставлять комментарии."

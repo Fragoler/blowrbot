@@ -9,8 +9,10 @@ import (
 	"os/signal"
 	"syscall"
 
+	"loudbot/internal/achievement"
 	"loudbot/internal/comment"
 	"loudbot/internal/config"
+	"loudbot/internal/profile"
 	"loudbot/internal/storage"
 	"loudbot/internal/telegram"
 )
@@ -71,24 +73,19 @@ func run(configPath string) error {
 		BotUsername:   cfg.Telegram.BotUsername,
 		ReplyLinkText: cfg.Messages.ReplyLink,
 		ChannelID:     cfg.Telegram.ChannelID,
-		Nicknames:     nicknames(cfg),
 		MaxTextLen:    cfg.Comments.MaxTextLen,
 		DraftTTL:      ttl,
 	})
 	bot.UseComments(comments)
+	bot.UseProfiles(profile.New(store))
+
+	location, err := cfg.Service.Location()
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	bot.UseAwarder(achievement.New(store, location, log))
 
 	return bot.Run(ctx)
-}
-
-// nicknames maps the config entries onto the core's own type, keeping config out
-// of the comment package's imports.
-func nicknames(cfg config.Config) []comment.Nickname {
-	out := make([]comment.Nickname, 0, len(cfg.Nicknames))
-	for _, n := range cfg.Nicknames {
-		out = append(out, comment.Nickname{Label: n.Label})
-	}
-
-	return out
 }
 
 func newLogger(level slog.Level) *slog.Logger {

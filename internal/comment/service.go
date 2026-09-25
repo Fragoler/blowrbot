@@ -19,8 +19,6 @@ type Options struct {
 	BotUsername string
 	// ChannelID is needed to build a /c/ link back to a post in a private channel.
 	ChannelID int64
-	// Nicknames is the mask list from config.toml, in the order it is offered.
-	Nicknames []Nickname
 	// ReplyLinkText is the wording of the link under every published comment.
 	ReplyLinkText string
 	MaxTextLen    int
@@ -104,7 +102,7 @@ func (s *Service) Start(ctx context.Context, userID int64, payload string) (Star
 		return StartResult{}, err
 	}
 
-	if _, err := s.Nicknames(); err != nil {
+	if _, err := s.Nicknames(ctx, userID); err != nil {
 		return StartResult{}, err
 	}
 
@@ -199,7 +197,7 @@ func (s *Service) Stage(ctx context.Context, req StageRequest) (StageResult, err
 		return StageResult{}, err
 	}
 
-	nicknames, err := s.Nicknames()
+	nicknames, err := s.Nicknames(ctx, req.UserID)
 	if err != nil {
 		return StageResult{}, err
 	}
@@ -267,7 +265,7 @@ func (s *Service) Publish(ctx context.Context, userID int64, label string) (Comm
 		return Comment{}, err
 	}
 
-	nickname, err := s.Nickname(label)
+	nickname, err := s.Nickname(ctx, userID, label)
 	if err != nil {
 		return Comment{}, err
 	}
@@ -447,10 +445,16 @@ func (s *Service) post(ctx context.Context, channelMessageID int) (Post, error) 
 	return post, nil
 }
 
-// Nickname resolves a label against the configured list. A label that is no
-// longer there — dropped from the config while a draft was open — is refused.
-func (s *Service) Nickname(label string) (Nickname, error) {
-	for _, n := range s.opts.Nicknames {
+// Nickname resolves a label against what this user may actually wear. The check
+// is a gate, not a lookup: a callback carries the label back from the client, so
+// a mask the user has not unlocked must be refused here.
+func (s *Service) Nickname(ctx context.Context, userID int64, label string) (Nickname, error) {
+	nicknames, err := s.Nicknames(ctx, userID)
+	if err != nil {
+		return Nickname{}, err
+	}
+
+	for _, n := range nicknames {
 		if n.Label == label {
 			return n, nil
 		}
@@ -459,13 +463,19 @@ func (s *Service) Nickname(label string) (Nickname, error) {
 	return Nickname{}, fmt.Errorf("%w: %q", ErrNicknameUnavailable, label)
 }
 
-// Nicknames returns the masks currently offered to authors.
-func (s *Service) Nicknames() ([]Nickname, error) {
-	if len(s.opts.Nicknames) == 0 {
+// Nicknames returns the masks offered to one author: the public ones, plus any
+// unlocked by an achievement they hold.
+func (s *Service) Nicknames(ctx context.Context, userID int64) ([]Nickname, error) {
+	nicknames, err := s.repo.Nicknames(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("nicknames: %w", err)
+	}
+
+	if len(nicknames) == 0 {
 		return nil, ErrNoNicknames
 	}
 
-	return s.opts.Nicknames, nil
+	return nicknames, nil
 }
 
 // orderNicknames moves the author's last mask to the front, leaving the config
