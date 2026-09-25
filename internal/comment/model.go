@@ -69,8 +69,11 @@ type Post struct {
 type Draft struct {
 	UserID int64
 	PostID int
-	Body   string
-	Media  []Media
+	// ReplyToCommentID is set when the author arrived through the "ответить" link
+	// under a comment; zero means they are commenting on the post itself.
+	ReplyToCommentID int64
+	Body             string
+	Media            []Media
 	// UserMessageID is the author's staged message; zero means nothing is staged
 	// and the bot is still waiting for them to write.
 	UserMessageID int
@@ -95,6 +98,8 @@ type Comment struct {
 	UserID   int64
 	PostID   int
 	Nickname string
+	// ReplyToCommentID is the comment this one answers, zero for a top-level one.
+	ReplyToCommentID int64
 	// MessageID is the id of the published message inside the discussion group.
 	MessageID int
 	Text      string
@@ -117,6 +122,7 @@ type Repository interface {
 	Draft(ctx context.Context, userID int64) (Draft, error)
 	DeleteDraft(ctx context.Context, userID int64) error
 
+	Comment(ctx context.Context, id int64) (Comment, error)
 	CreateComment(ctx context.Context, c Comment) (int64, error)
 	MarkCommentPublished(ctx context.Context, id int64, messageID int) error
 	MarkCommentFailed(ctx context.Context, id int64) error

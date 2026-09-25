@@ -81,18 +81,35 @@ func TestNicknameKeyboardWithoutMasks(t *testing.T) {
 func TestPromptText(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, msgPrompt, promptText("  "), "a post with no text is not quoted at all")
+	assert.Equal(t, msgPrompt, promptText("  ", msgPrompt), "a post with no text is not quoted at all")
 
-	quoted := promptText("Текст поста")
+	quoted := promptText("Текст поста", msgPrompt)
 	assert.Contains(t, quoted, "<blockquote>Текст поста</blockquote>")
 	assert.Contains(t, quoted, msgPrompt)
 
 	// The quote is sent as HTML, so a post containing markup must not break it.
-	assert.Contains(t, promptText("<b>жирный</b>"), "&lt;b&gt;жирный&lt;/b&gt;")
+	assert.Contains(t, promptText("<b>жирный</b>", msgPrompt), "&lt;b&gt;жирный&lt;/b&gt;")
 
-	long := promptText(strings.Repeat("я", quoteLimit+50))
+	long := promptText(strings.Repeat("я", quoteLimit+50), msgPrompt)
 	assert.Contains(t, long, "…", "a long post is cut down to a hint")
 	assert.Less(t, utf8.RuneCountInString(long), quoteLimit+len([]rune(msgPrompt))+40)
+}
+
+func TestStartPrompt(t *testing.T) {
+	t.Parallel()
+
+	onPost := startPrompt(comment.StartResult{Post: comment.Post{Body: "Текст поста"}})
+	assert.Contains(t, onPost, "<blockquote>Текст поста</blockquote>")
+	assert.Contains(t, onPost, msgPrompt)
+
+	onComment := startPrompt(comment.StartResult{
+		Post:    comment.Post{Body: "Текст поста"},
+		ReplyTo: comment.Comment{ID: 7, Nickname: "Сова", Text: "а где продолжение?"},
+	})
+	assert.Contains(t, onComment, "<blockquote>Сова: а где продолжение?</blockquote>",
+		"a reply quotes the comment it answers, not the post")
+	assert.Contains(t, onComment, msgReplyPrompt)
+	assert.NotContains(t, onComment, "Текст поста")
 }
 
 func TestMessageBody(t *testing.T) {
@@ -179,6 +196,7 @@ func TestUserMessage(t *testing.T) {
 	}{
 		{name: "guard reason reaches the author", err: &comment.RejectedError{Reason: "слишком часто"}, want: "слишком часто"},
 		{name: "nothing staged", err: comment.ErrNothingStaged, want: msgErrNothing},
+		{name: "deleted parent comment", err: comment.ErrUnknownComment, want: msgErrUnknownComm},
 		{name: "banned", err: comment.ErrBanned, want: msgErrBanned},
 		{name: "wrapped sentinel", err: errors.Join(errors.New("ctx"), comment.ErrDraftExpired), want: msgErrDraftExpired},
 		{name: "no draft", err: comment.ErrNoDraft, want: msgErrNoDraft},
@@ -199,6 +217,7 @@ func TestExpected(t *testing.T) {
 
 	assert.True(t, expected(comment.ErrEmptyComment))
 	assert.True(t, expected(comment.ErrNothingStaged))
+	assert.True(t, expected(comment.ErrUnknownComment))
 	assert.True(t, expected(&comment.RejectedError{Reason: "стоп-слово"}))
 	assert.False(t, expected(errors.New("boom")), "a real failure must still be logged as an error")
 }

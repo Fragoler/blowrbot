@@ -199,6 +199,7 @@ func TestDraftLifecycle(t *testing.T) {
 	assert.WithinDuration(t, created, got.CreatedAt, time.Millisecond)
 
 	// Staging a message must overwrite in place: user_id is the primary key.
+	draft.ReplyToCommentID = 0
 	draft.Body = "привет"
 	draft.Media = []comment.Media{{Type: comment.MediaPhoto, FileID: "f1", FileUniqueID: "u1"}}
 	draft.UserMessageID = 500
@@ -212,6 +213,7 @@ func TestDraftLifecycle(t *testing.T) {
 	assert.True(t, got.Staged())
 	assert.Equal(t, 500, got.UserMessageID)
 	assert.Equal(t, 501, got.PromptMessageID)
+	assert.Zero(t, got.ReplyToCommentID, "a NULL parent reads back as zero, not as comment 0")
 
 	require.NoError(t, st.DeleteDraft(ctx, userID))
 	_, err = st.Draft(ctx, userID)
@@ -319,4 +321,44 @@ func TestSaveReport(t *testing.T) {
 	require.NoError(t, probe(ctx, t).
 		QueryRow(ctx, `SELECT count(*) FROM reports WHERE target_type = 'comment' AND target_id = 1`).Scan(&n))
 	assert.Equal(t, 2, n, "every complaint is kept, duplicates included")
+}
+
+func TestReplyChain(t *testing.T) {
+	st, ctx := open(t)
+
+	const (
+		author  = int64(10_007)
+		replier = int64(10_008)
+	)
+
+	for _, id := range []int64{author, replier} {
+		_, err := st.EnsureUser(ctx, id)
+		require.NoError(t, err)
+	}
+
+	parentID, err := st.CreateComment(ctx, comment.Comment{
+		UserID: author, PostID: 4242, Nickname: fox,
+		Text: "первый", Status: comment.StatusPending, CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, st.MarkCommentPublished(ctx, parentID, 8800))
+
+	parent, err := st.Comment(ctx, parentID)
+	require.NoError(t, err)
+	assert.Equal(t, 8800, parent.MessageID, "a reply needs this to hang off the right message")
+	assert.Equal(t, comment.StatusPublished, parent.Status)
+	assert.Zero(t, parent.ReplyToCommentID)
+
+	replyID, err := st.CreateComment(ctx, comment.Comment{
+		UserID: replier, PostID: 4242, Nickname: owl, ReplyToCommentID: parentID,
+		Text: "второй", Status: comment.StatusPending, CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	reply, err := st.Comment(ctx, replyID)
+	require.NoError(t, err)
+	assert.Equal(t, parentID, reply.ReplyToCommentID, "the foreign key holds the chain together")
+
+	_, err = st.Comment(ctx, 999_999)
+	require.ErrorIs(t, err, comment.ErrNotFound)
 }

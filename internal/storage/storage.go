@@ -132,10 +132,12 @@ func (s *Storage) MarkInvitePosted(ctx context.Context, channelMessageID, invite
 
 func (s *Storage) SaveDraft(ctx context.Context, draft comment.Draft) error {
 	const q = `
-INSERT INTO comment_drafts (user_id, post_id, body, media_json, user_message_id, prompt_message_id, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO comment_drafts
+    (user_id, post_id, reply_to_comment_id, body, media_json, user_message_id, prompt_message_id, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 ON CONFLICT (user_id) DO UPDATE
 SET post_id = EXCLUDED.post_id,
+    reply_to_comment_id = EXCLUDED.reply_to_comment_id,
     body = EXCLUDED.body,
     media_json = EXCLUDED.media_json,
     user_message_id = EXCLUDED.user_message_id,
@@ -148,7 +150,7 @@ SET post_id = EXCLUDED.post_id,
 	}
 
 	if _, err := s.pool.Exec(ctx, q,
-		draft.UserID, draft.PostID, draft.Body, media,
+		draft.UserID, draft.PostID, nullableID(draft.ReplyToCommentID), draft.Body, media,
 		draft.UserMessageID, draft.PromptMessageID, draft.CreatedAt,
 	); err != nil {
 		return fmt.Errorf("save draft: %w", err)
@@ -159,7 +161,8 @@ SET post_id = EXCLUDED.post_id,
 
 func (s *Storage) Draft(ctx context.Context, userID int64) (comment.Draft, error) {
 	const q = `
-SELECT user_id, post_id, body, media_json, user_message_id, prompt_message_id, created_at
+SELECT user_id, post_id, COALESCE(reply_to_comment_id, 0), body, media_json,
+       user_message_id, prompt_message_id, created_at
 FROM comment_drafts WHERE user_id = $1`
 
 	var (
@@ -168,7 +171,8 @@ FROM comment_drafts WHERE user_id = $1`
 	)
 
 	err := s.pool.QueryRow(ctx, q, userID).
-		Scan(&d.UserID, &d.PostID, &d.Body, &media, &d.UserMessageID, &d.PromptMessageID, &d.CreatedAt)
+		Scan(&d.UserID, &d.PostID, &d.ReplyToCommentID, &d.Body, &media,
+			&d.UserMessageID, &d.PromptMessageID, &d.CreatedAt)
 	if err != nil {
 		return comment.Draft{}, notFound(err)
 	}
@@ -195,17 +199,47 @@ func (s *Storage) CreateComment(ctx context.Context, c comment.Comment) (int64, 
 	}
 
 	const q = `
-INSERT INTO comments (user_id, post_id, nickname, content_text, media_json, status, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO comments
+    (user_id, post_id, nickname, reply_to_comment_id, content_text, media_json, status, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 RETURNING id`
 
 	var id int64
-	err = s.pool.QueryRow(ctx, q, c.UserID, c.PostID, c.Nickname, c.Text, media, c.Status, c.CreatedAt).Scan(&id)
+	err = s.pool.QueryRow(ctx, q,
+		c.UserID, c.PostID, c.Nickname, nullableID(c.ReplyToCommentID),
+		c.Text, media, c.Status, c.CreatedAt,
+	).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("create comment: %w", err)
 	}
 
 	return id, nil
+}
+
+// Comment loads one comment, which is how a reply finds the message it answers.
+func (s *Storage) Comment(ctx context.Context, id int64) (comment.Comment, error) {
+	const q = `
+SELECT id, user_id, post_id, nickname, COALESCE(reply_to_comment_id, 0),
+       COALESCE(message_id_in_group, 0), content_text, media_json, status, created_at
+FROM comments WHERE id = $1`
+
+	var (
+		c     comment.Comment
+		media []byte
+	)
+
+	err := s.pool.QueryRow(ctx, q, id).
+		Scan(&c.ID, &c.UserID, &c.PostID, &c.Nickname, &c.ReplyToCommentID,
+			&c.MessageID, &c.Text, &media, &c.Status, &c.CreatedAt)
+	if err != nil {
+		return comment.Comment{}, notFound(err)
+	}
+
+	if err := json.Unmarshal(media, &c.Media); err != nil {
+		return comment.Comment{}, fmt.Errorf("decode comment media: %w", err)
+	}
+
+	return c, nil
 }
 
 // MarkCommentPublished stores the group message id and, in the same transaction,
@@ -253,6 +287,16 @@ func (s *Storage) MarkCommentFailed(ctx context.Context, id int64) error {
 	}
 
 	return nil
+}
+
+// nullableID maps the zero "no such row" id onto a real SQL NULL, so that the
+// foreign key holds and an absent parent is not stored as comment 0.
+func nullableID(id int64) *int64 {
+	if id == 0 {
+		return nil
+	}
+
+	return &id
 }
 
 // nonNilMedia keeps the JSONB column an array rather than null.

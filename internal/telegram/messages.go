@@ -19,9 +19,10 @@ const (
 	msgHelp = "Этот бот публикует анонимные комментарии.\n\n" +
 		"Нажмите «" + btnComment + "» под постом в канале — и напишите сюда текст или пришлите медиа."
 
-	// msgPrompt greets an author who just arrived from a post; the quote of the
-	// post itself is appended to it.
-	msgPrompt = "Напишите комментарий к посту — текстом или медиа."
+	// msgPrompt and msgReplyPrompt greet an author who just arrived; the quote of
+	// what they are answering is prepended to them.
+	msgPrompt      = "Напишите комментарий к посту — текстом или медиа."
+	msgReplyPrompt = "Напишите ответ — текстом или медиа."
 
 	msgChooseNickname = "Под каким псевдонимом отправить?"
 	msgPublished      = "Комментарий отправлен."
@@ -30,6 +31,7 @@ const (
 	msgErrBanned       = "Вы не можете оставлять комментарии."
 	msgErrBadPayload   = "Ссылка не распознана. Откройте её кнопкой под постом."
 	msgErrUnknownPost  = "Пост не найден — возможно, он удалён."
+	msgErrUnknownComm  = "Комментарий не найден — возможно, он удалён."
 	msgErrNoNicknames  = "Список псевдонимов пуст, комментарии временно недоступны."
 	msgErrNoDraft      = "Сначала нажмите «" + btnComment + "» под нужным постом."
 	msgErrDraftExpired = "Время на комментарий истекло. Нажмите кнопку под постом ещё раз."
@@ -55,6 +57,8 @@ func userMessage(err error) string {
 		return msgErrBadPayload
 	case errors.Is(err, comment.ErrUnknownPost):
 		return msgErrUnknownPost
+	case errors.Is(err, comment.ErrUnknownComment):
+		return msgErrUnknownComm
 	case errors.Is(err, comment.ErrNoNicknames):
 		return msgErrNoNicknames
 	case errors.Is(err, comment.ErrNoDraft):
@@ -85,6 +89,7 @@ func expected(err error) bool {
 		comment.ErrBanned,
 		comment.ErrBadPayload,
 		comment.ErrUnknownPost,
+		comment.ErrUnknownComment,
 		comment.ErrNoNicknames,
 		comment.ErrNoDraft,
 		comment.ErrDraftExpired,

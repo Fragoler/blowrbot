@@ -74,17 +74,26 @@ func (s *Service) DeepLink(channelMessageID int) string {
 	return DeepLink(s.opts.BotUsername, channelMessageID)
 }
 
-// StartResult is what the bot shows the moment an author opens it from a post.
+// StartResult is what the bot shows the moment an author opens it from a post or
+// from the "ответить" link under a comment.
 type StartResult struct {
 	Post Post
 	// Link points back at the post itself.
 	Link string
+	// ReplyTo is the comment being answered; its ID is zero for a plain comment.
+	ReplyTo Comment
 }
 
-// Start binds the author to the post they tapped and invites them to write. It
-// does not ask for a mask yet: that happens once there is something to sign.
+// IsReply reports whether the author arrived to answer a comment.
+func (r StartResult) IsReply() bool {
+	return r.ReplyTo.ID != 0
+}
+
+// Start binds the author to what they tapped — a post, or a comment to answer —
+// and invites them to write. It does not ask for a mask yet: that happens once
+// there is something to sign.
 func (s *Service) Start(ctx context.Context, userID int64, payload string) (StartResult, error) {
-	postID, err := ParseStartPayload(payload)
+	target, err := ParseStartPayload(payload)
 	if err != nil {
 		return StartResult{}, err
 	}
@@ -93,21 +102,59 @@ func (s *Service) Start(ctx context.Context, userID int64, payload string) (Star
 		return StartResult{}, err
 	}
 
+	if _, err := s.Nicknames(); err != nil {
+		return StartResult{}, err
+	}
+
+	var result StartResult
+
+	postID := target.PostID
+	if target.IsReply() {
+		parent, err := s.comment(ctx, target.CommentID)
+		if err != nil {
+			return StartResult{}, err
+		}
+
+		postID = parent.PostID
+		result.ReplyTo = parent
+	}
+
 	post, err := s.post(ctx, postID)
 	if err != nil {
 		return StartResult{}, err
 	}
 
-	if _, err := s.Nicknames(); err != nil {
-		return StartResult{}, err
+	draft := Draft{
+		UserID:           userID,
+		PostID:           postID,
+		ReplyToCommentID: target.CommentID,
+		CreatedAt:        s.now(),
 	}
-
-	draft := Draft{UserID: userID, PostID: postID, CreatedAt: s.now()}
 	if err := s.repo.SaveDraft(ctx, draft); err != nil {
 		return StartResult{}, fmt.Errorf("save draft: %w", err)
 	}
 
-	return StartResult{Post: post, Link: PostLink(post, s.opts.ChannelID)}, nil
+	result.Post = post
+	result.Link = PostLink(post, s.opts.ChannelID)
+
+	return result, nil
+}
+
+// comment loads a comment that is still available to answer.
+func (s *Service) comment(ctx context.Context, id int64) (Comment, error) {
+	c, err := s.repo.Comment(ctx, id)
+	switch {
+	case errors.Is(err, ErrNotFound):
+		return Comment{}, fmt.Errorf("%w: %d", ErrUnknownComment, id)
+	case err != nil:
+		return Comment{}, fmt.Errorf("comment: %w", err)
+	}
+
+	if c.Status != StatusPublished || c.MessageID == 0 {
+		return Comment{}, fmt.Errorf("%w: %d is not published", ErrUnknownComment, id)
+	}
+
+	return c, nil
 }
 
 // StageRequest is a message the author sent to the bot in private.
@@ -223,16 +270,31 @@ func (s *Service) Publish(ctx context.Context, userID int64, label string) (Comm
 		return Comment{}, err
 	}
 
-	c := Comment{
-		UserID:    userID,
-		PostID:    draft.PostID,
-		Nickname:  nickname.Label,
-		Text:      draft.Body,
-		Media:     draft.Media,
-		Status:    StatusPending,
-		CreatedAt: s.now(),
+	// A reply hangs off the comment it answers; a plain comment off the post's
+	// forwarded copy, which is what puts it in the thread at all.
+	replyTo := post.DiscussionMessageID
+	if draft.ReplyToCommentID != 0 {
+		parent, err := s.comment(ctx, draft.ReplyToCommentID)
+		if err != nil {
+			return Comment{}, err
+		}
+
+		replyTo = parent.MessageID
 	}
 
+	c := Comment{
+		UserID:           userID,
+		PostID:           draft.PostID,
+		Nickname:         nickname.Label,
+		ReplyToCommentID: draft.ReplyToCommentID,
+		Text:             draft.Body,
+		Media:            draft.Media,
+		Status:           StatusPending,
+		CreatedAt:        s.now(),
+	}
+
+	// The row is created before the message is sent because its own id goes into
+	// the "ответить" link the message carries.
 	id, err := s.repo.CreateComment(ctx, c)
 	if err != nil {
 		return Comment{}, fmt.Errorf("create comment: %w", err)
@@ -241,8 +303,8 @@ func (s *Service) Publish(ctx context.Context, userID int64, label string) (Comm
 
 	published, err := s.pub.PublishComment(ctx, PublishRequest{
 		ChatID:           post.DiscussionChatID,
-		ReplyToMessageID: post.DiscussionMessageID,
-		Text:             FormatBody(nickname, draft.Body),
+		ReplyToMessageID: replyTo,
+		Text:             FormatBody(nickname, draft.Body, ReplyDeepLink(s.opts.BotUsername, id)),
 		Media:            draft.Media,
 	})
 	if err != nil {

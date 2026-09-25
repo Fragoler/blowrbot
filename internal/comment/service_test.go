@@ -2,6 +2,7 @@ package comment_test
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -361,9 +362,9 @@ func TestPublish(t *testing.T) {
 	assert.Equal(t, comment.PublishRequest{
 		ChatID:           discussionID,
 		ReplyToMessageID: threadMsgID,
-		Text:             "<b>Сова</b>\n\nпривет",
+		Text:             "<b>Сова</b>\n\nпривет\n\n<a href=\"https://t.me/anon_bot?start=reply_1\">ответить</a>",
 		Media:            draft.Media,
-	}, pub.requests[0], "the comment lands in the post's thread, signed in bold")
+	}, pub.requests[0], "the comment lands in the post's thread, signed in bold, with its own reply link")
 
 	assert.Equal(t, owl.Label, repo.users[userID].LastNickname, "the mask is remembered for next time")
 
@@ -521,7 +522,7 @@ func TestDefaultsAreApplied(t *testing.T) {
 
 	_, err := svc.Publish(context.Background(), userID, fox.Label)
 	require.NoError(t, err)
-	assert.Equal(t, "<b>Лис</b>\n\nпривет", pub.requests[0].Text)
+	assert.Equal(t, "<b>Лис</b>\n\nпривет\n\n<a href=\"https://t.me/anon_bot?start=reply_1\">ответить</a>", pub.requests[0].Text)
 }
 
 func TestNicknames(t *testing.T) {
@@ -629,4 +630,125 @@ func TestOnPostPublishedRepositoryErrors(t *testing.T) {
 			require.ErrorIs(t, svc.OnPostPublished(context.Background(), testPost()), errBoom)
 		})
 	}
+}
+
+// publishedComment is a comment already live in the thread, the kind an author
+// can answer through its "ответить" link.
+func publishedComment() comment.Comment {
+	return comment.Comment{
+		ID:        7,
+		UserID:    999,
+		PostID:    postID,
+		Nickname:  owl.Label,
+		MessageID: 8800,
+		Text:      "а где продолжение?",
+		Status:    comment.StatusPublished,
+	}
+}
+
+func TestStartReplyBindsToTheComment(t *testing.T) {
+	t.Parallel()
+
+	parent := publishedComment()
+	repo := fullRepo().withComment(parent)
+	svc := newService(t, repo, &fakePublisher{}, nil)
+
+	got, err := svc.Start(context.Background(), userID, "reply_7")
+	require.NoError(t, err)
+
+	require.True(t, got.IsReply())
+	assert.Equal(t, parent.Text, got.ReplyTo.Text, "the transport quotes the comment being answered")
+	assert.Equal(t, owl.Label, got.ReplyTo.Nickname)
+	assert.Equal(t, postID, got.Post.ChannelMessageID, "a reply belongs to the same post")
+
+	stored := repo.drafts[userID]
+	assert.Equal(t, int64(7), stored.ReplyToCommentID)
+	assert.Equal(t, postID, stored.PostID)
+}
+
+func TestStartReplyErrors(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		repo    func() *fakeRepo
+		wantErr error
+	}{
+		{
+			name:    "comment does not exist",
+			repo:    fullRepo,
+			wantErr: comment.ErrUnknownComment,
+		},
+		{
+			name: "comment never reached the group",
+			repo: func() *fakeRepo {
+				c := publishedComment()
+				c.Status = comment.StatusFailed
+				c.MessageID = 0
+
+				return fullRepo().withComment(c)
+			},
+			wantErr: comment.ErrUnknownComment,
+		},
+		{
+			name: "post gone while the link was open",
+			repo: func() *fakeRepo {
+				return newRepo().withUser(comment.User{ID: userID}).withComment(publishedComment())
+			},
+			wantErr: comment.ErrUnknownPost,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			repo := tc.repo()
+			svc := newService(t, repo, &fakePublisher{}, nil)
+
+			_, err := svc.Start(context.Background(), userID, "reply_7")
+			require.ErrorIs(t, err, tc.wantErr)
+			assert.Empty(t, repo.drafts, "a failed start must not leave a draft behind")
+		})
+	}
+}
+
+func TestPublishReplyHangsOffTheParentMessage(t *testing.T) {
+	t.Parallel()
+
+	parent := publishedComment()
+
+	draft := stagedDraft()
+	draft.ReplyToCommentID = parent.ID
+
+	repo := fullRepo().withComment(parent).withDraft(draft)
+	pub := &fakePublisher{result: comment.PublishResult{MessageID: 9100}}
+	svc := newService(t, repo, pub, nil)
+
+	got, err := svc.Publish(context.Background(), userID, fox.Label)
+	require.NoError(t, err)
+
+	assert.Equal(t, parent.ID, got.ReplyToCommentID)
+
+	require.Len(t, pub.requests, 1)
+	assert.Equal(t, parent.MessageID, pub.requests[0].ReplyToMessageID,
+		"a reply hangs off the comment it answers, not off the post")
+	assert.Contains(t, pub.requests[0].Text, "start=reply_"+strconv.FormatInt(got.ID, 10),
+		"the reply carries its own link, so it can be answered in turn")
+}
+
+func TestPublishReplyToDeletedComment(t *testing.T) {
+	t.Parallel()
+
+	draft := stagedDraft()
+	draft.ReplyToCommentID = 7
+
+	repo := fullRepo().withDraft(draft)
+	pub := &fakePublisher{result: comment.PublishResult{MessageID: 1}}
+	svc := newService(t, repo, pub, nil)
+
+	_, err := svc.Publish(context.Background(), userID, fox.Label)
+	require.ErrorIs(t, err, comment.ErrUnknownComment)
+	assert.Empty(t, pub.requests, "nothing is published when the parent is gone")
+	assert.Empty(t, repo.comments, "and no row is left behind for it")
 }

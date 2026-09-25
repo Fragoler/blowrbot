@@ -131,7 +131,7 @@ func (b *Bot) onStart(ctx context.Context, msg *models.Message, payload string) 
 
 	params := &tgbot.SendMessageParams{
 		ChatID:    msg.Chat.ID,
-		Text:      promptText(started.Post.Body),
+		Text:      startPrompt(started),
 		ParseMode: models.ParseModeHTML,
 	}
 
@@ -294,15 +294,24 @@ func startPayload(text string) (string, bool) {
 	return strings.TrimSpace(strings.TrimPrefix(text, startCommand)), true
 }
 
-// promptText asks for the comment, quoting the post so the author can see what
-// they are answering without leaving the chat.
-func promptText(body string) string {
-	quote := truncate(strings.TrimSpace(body), quoteLimit)
-	if quote == "" {
-		return msgPrompt
+// startPrompt asks for the text, quoting whatever the author is answering — the
+// post, or the comment they opened through its "ответить" link.
+func startPrompt(started comment.StartResult) string {
+	if started.IsReply() {
+		return promptText(started.ReplyTo.Nickname+": "+started.ReplyTo.Text, msgReplyPrompt)
 	}
 
-	return "<blockquote>" + html.EscapeString(quote) + "</blockquote>\n" + msgPrompt
+	return promptText(started.Post.Body, msgPrompt)
+}
+
+// promptText puts a short quote of the source above the instruction.
+func promptText(source, ask string) string {
+	quote := truncate(strings.TrimSpace(source), quoteLimit)
+	if quote == "" {
+		return ask
+	}
+
+	return "<blockquote>" + html.EscapeString(quote) + "</blockquote>\n" + ask
 }
 
 func truncate(s string, limit int) string {

@@ -12,6 +12,7 @@ var (
 	ErrBadPayload          = errors.New("malformed deep link payload")
 	ErrBanned              = errors.New("user is banned")
 	ErrUnknownPost         = errors.New("unknown post")
+	ErrUnknownComment      = errors.New("unknown comment")
 	ErrNoNicknames         = errors.New("no active nicknames")
 	ErrNoDraft             = errors.New("no active comment draft")
 	ErrNothingStaged       = errors.New("no message is waiting for a mask")

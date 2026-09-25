@@ -30,6 +30,7 @@ type fakeRepo struct {
 	saveDraftErr   error
 	deleteDraftErr error
 	createErr      error
+	commentErr     error
 	publishedErr   error
 	failedErr      error
 	lastNickErr    error
@@ -184,6 +185,30 @@ func (r *fakeRepo) DeleteDraft(_ context.Context, userID int64) error {
 	delete(r.drafts, userID)
 
 	return nil
+}
+
+func (r *fakeRepo) Comment(_ context.Context, id int64) (comment.Comment, error) {
+	r.record("Comment")
+
+	if r.commentErr != nil {
+		return comment.Comment{}, r.commentErr
+	}
+
+	c, ok := r.comments[id]
+	if !ok {
+		return comment.Comment{}, comment.ErrNotFound
+	}
+
+	return c, nil
+}
+
+func (r *fakeRepo) withComment(c comment.Comment) *fakeRepo {
+	r.comments[c.ID] = c
+	if c.ID > r.nextCommentID {
+		r.nextCommentID = c.ID
+	}
+
+	return r
 }
 
 func (r *fakeRepo) CreateComment(_ context.Context, c comment.Comment) (int64, error) {

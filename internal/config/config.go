@@ -94,7 +94,8 @@ type Comments struct {
 	// DraftTTL bounds how long a deep-link tap stays valid, e.g. "1h" or "30m".
 	DraftTTL string `toml:"draft_ttl"`
 	// InviteText is the bot's first comment under every post; empty means the default.
-	InviteText string `toml:"invite_text"`
+	InviteText     string `toml:"invite_text"`
+	AnswerLinkText string `toml:"answer_link_text"`
 }
 
 // TTL parses DraftTTL; Validate reports a malformed value separately.

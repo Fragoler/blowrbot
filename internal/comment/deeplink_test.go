@@ -23,17 +23,20 @@ func TestParseStartPayload(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload string
-		want    int
+		want    comment.StartTarget
 		wantErr bool
 	}{
-		{name: "ok", payload: "comment_42", want: 42},
-		{name: "trims spaces", payload: "  comment_7  ", want: 7},
-		{name: "round trip", payload: strings.TrimPrefix(comment.DeepLink("b", 123), "https://t.me/b?start="), want: 123},
+		{name: "comment on a post", payload: "comment_42", want: comment.StartTarget{PostID: 42}},
+		{name: "trims spaces", payload: "  comment_7  ", want: comment.StartTarget{PostID: 7}},
+		{name: "reply to a comment", payload: "reply_9", want: comment.StartTarget{CommentID: 9}},
 		{name: "wrong prefix", payload: "suggest_42", wantErr: true},
 		{name: "empty", payload: "", wantErr: true},
 		{name: "prefix only", payload: "comment_", wantErr: true},
+		{name: "reply prefix only", payload: "reply_", wantErr: true},
 		{name: "not a number", payload: "comment_abc", wantErr: true},
+		{name: "reply not a number", payload: "reply_abc", wantErr: true},
 		{name: "zero", payload: "comment_0", wantErr: true},
+		{name: "reply zero", payload: "reply_0", wantErr: true},
 		{name: "negative", payload: "comment_-1", wantErr: true},
 		{name: "too long", payload: "comment_" + strings.Repeat("9", 60), wantErr: true},
 	}
@@ -51,8 +54,30 @@ func TestParseStartPayload(t *testing.T) {
 
 			require.NoError(t, err)
 			assert.Equal(t, tc.want, got)
+			assert.Equal(t, tc.want.CommentID != 0, got.IsReply())
 		})
 	}
+}
+
+func TestStartPayloadRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	const bot = "anon_bot"
+
+	post, err := comment.ParseStartPayload(payloadOf(comment.DeepLink(bot, 123)))
+	require.NoError(t, err)
+	assert.Equal(t, comment.StartTarget{PostID: 123}, post)
+
+	reply, err := comment.ParseStartPayload(payloadOf(comment.ReplyDeepLink(bot, 456)))
+	require.NoError(t, err)
+	assert.Equal(t, comment.StartTarget{CommentID: 456}, reply)
+}
+
+// payloadOf extracts what Telegram hands the bot as the /start argument.
+func payloadOf(deepLink string) string {
+	_, payload, _ := strings.Cut(deepLink, "?start=")
+
+	return payload
 }
 
 func TestCallbackRoundTrip(t *testing.T) {
@@ -93,28 +118,44 @@ func TestFormatBody(t *testing.T) {
 	t.Parallel()
 
 	nick := comment.Nickname{Label: "Лис"}
+	const link = "https://t.me/anon_bot?start=reply_7"
 
 	cases := []struct {
 		name string
 		nick comment.Nickname
 		text string
+		link string
 		want string
 	}{
-		{name: "mask in bold, then a blank line", nick: nick, text: "привет", want: "<b>Лис</b>\n\nпривет"},
-		{name: "trims text", nick: nick, text: "  привет  ", want: "<b>Лис</b>\n\nпривет"},
-		{name: "media only keeps the mask alone", nick: nick, text: "", want: "<b>Лис</b>"},
-		{name: "multiline text survives", nick: nick, text: "one\ntwo", want: "<b>Лис</b>\n\none\ntwo"},
+		{
+			name: "mask, text, then the reply link",
+			nick: nick, text: "привет", link: link,
+			want: "<b>Лис</b>\n\nпривет\n\n<a href=\"https://t.me/anon_bot?start=reply_7\">ответить</a>",
+		},
+		{
+			name: "trims text",
+			nick: nick, text: "  привет  ",
+			want: "<b>Лис</b>\n\nпривет",
+		},
+		{
+			name: "media only keeps the mask and the link",
+			nick: nick, link: link,
+			want: "<b>Лис</b>\n\n<a href=\"https://t.me/anon_bot?start=reply_7\">ответить</a>",
+		},
+		{
+			name: "multiline text survives",
+			nick: nick, text: "one\ntwo",
+			want: "<b>Лис</b>\n\none\ntwo",
+		},
 		{
 			// Telegram parses the result as HTML, so a comment cannot inject markup.
 			name: "markup in the text is escaped",
-			nick: nick,
-			text: "<b>жирный</b> & <script>",
+			nick: nick, text: "<b>жирный</b> & <script>",
 			want: "<b>Лис</b>\n\n&lt;b&gt;жирный&lt;/b&gt; &amp; &lt;script&gt;",
 		},
 		{
 			name: "markup in the mask is escaped too",
-			nick: comment.Nickname{Label: "<i>Лис"},
-			text: "привет",
+			nick: comment.Nickname{Label: "<i>Лис"}, text: "привет",
 			want: "<b>&lt;i&gt;Лис</b>\n\nпривет",
 		},
 	}
@@ -123,9 +164,16 @@ func TestFormatBody(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, comment.FormatBody(tc.nick, tc.text))
+			assert.Equal(t, tc.want, comment.FormatBody(tc.nick, tc.text, tc.link))
 		})
 	}
+}
+
+func TestReplyDeepLink(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "https://t.me/anon_bot?start=reply_7", comment.ReplyDeepLink("anon_bot", 7))
+	assert.Equal(t, "https://t.me/anon_bot?start=reply_7", comment.ReplyDeepLink(" @anon_bot ", 7))
 }
 
 func TestPostLink(t *testing.T) {

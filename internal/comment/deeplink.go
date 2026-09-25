@@ -8,8 +8,10 @@ import (
 )
 
 const (
-	// startPrefix marks a /start payload that opens a comment draft.
+	// startPrefix marks a /start payload that opens a comment draft, replyPrefix
+	// one that answers an existing comment.
 	startPrefix = "comment_"
+	replyPrefix = "reply_"
 	// nicknamePrefix namespaces the inline callback data of a mask button.
 	nicknamePrefix = "nick:"
 	// CancelCallback is the callback data of the button that drops a staged message.
@@ -24,31 +26,59 @@ const (
 
 // DeepLink builds the URL behind the "comment anonymously" button under a post.
 func DeepLink(botUsername string, channelMessageID int) string {
-	return fmt.Sprintf("https://t.me/%s?start=%s%d",
-		strings.TrimPrefix(strings.TrimSpace(botUsername), "@"),
-		startPrefix,
-		channelMessageID,
-	)
+	return fmt.Sprintf("https://t.me/%s?start=%s%d", botName(botUsername), startPrefix, channelMessageID)
 }
 
-// ParseStartPayload extracts the channel post id from a /start payload.
-func ParseStartPayload(payload string) (int, error) {
+// ReplyDeepLink builds the URL behind the "ответить" link under a published
+// comment. The comment id travels in it, which is why a comment row is created
+// before the message is sent.
+func ReplyDeepLink(botUsername string, commentID int64) string {
+	return fmt.Sprintf("https://t.me/%s?start=%s%d", botName(botUsername), replyPrefix, commentID)
+}
+
+func botName(botUsername string) string {
+	return strings.TrimPrefix(strings.TrimSpace(botUsername), "@")
+}
+
+// StartTarget is what a /start deep link points at: a post to comment on, or a
+// comment to answer.
+type StartTarget struct {
+	PostID    int
+	CommentID int64
+}
+
+// IsReply reports whether the author arrived to answer a comment.
+func (t StartTarget) IsReply() bool {
+	return t.CommentID != 0
+}
+
+// ParseStartPayload reads the target out of a /start payload.
+func ParseStartPayload(payload string) (StartTarget, error) {
 	payload = strings.TrimSpace(payload)
 	if len(payload) > maxPayloadLen {
-		return 0, fmt.Errorf("%w: %d bytes", ErrBadPayload, len(payload))
+		return StartTarget{}, fmt.Errorf("%w: %d bytes", ErrBadPayload, len(payload))
+	}
+
+	if raw, ok := strings.CutPrefix(payload, replyPrefix); ok {
+		id, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || id <= 0 {
+			return StartTarget{}, fmt.Errorf("%w: %q", ErrBadPayload, payload)
+		}
+
+		return StartTarget{CommentID: id}, nil
 	}
 
 	raw, ok := strings.CutPrefix(payload, startPrefix)
 	if !ok {
-		return 0, fmt.Errorf("%w: %q", ErrBadPayload, payload)
+		return StartTarget{}, fmt.Errorf("%w: %q", ErrBadPayload, payload)
 	}
 
 	id, err := strconv.Atoi(raw)
 	if err != nil || id <= 0 {
-		return 0, fmt.Errorf("%w: %q", ErrBadPayload, payload)
+		return StartTarget{}, fmt.Errorf("%w: %q", ErrBadPayload, payload)
 	}
 
-	return id, nil
+	return StartTarget{PostID: id}, nil
 }
 
 // NicknameCallback builds the callback data of a nickname button. The label
@@ -73,18 +103,25 @@ func ParseNicknameCallback(data string) (string, error) {
 	return raw, nil
 }
 
-// FormatBody renders a comment for the discussion group: the mask in bold, then a
-// blank line, then the author's words. The result is Telegram HTML, so both parts
-// are escaped — a comment containing "<b>" must read as text, not as markup.
-func FormatBody(nickname Nickname, text string) string {
-	name := "<b>" + html.EscapeString(strings.TrimSpace(nickname.Label)) + "</b>"
+// ReplyLinkText is the wording of the link that opens the bot to answer a comment.
+const ReplyLinkText = "ответить"
 
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return name
+// FormatBody renders a comment for the discussion group: the mask in bold, a blank
+// line, the author's words, and a plain link that opens the bot to answer this
+// comment. The result is Telegram HTML, so every part written by a person is
+// escaped — a comment containing "<b>" must read as text, not as markup.
+func FormatBody(nickname Nickname, text, replyLink string) string {
+	parts := []string{"<b>" + html.EscapeString(strings.TrimSpace(nickname.Label)) + "</b>"}
+
+	if text = strings.TrimSpace(text); text != "" {
+		parts = append(parts, html.EscapeString(text))
 	}
 
-	return name + "\n\n" + html.EscapeString(text)
+	if replyLink != "" {
+		parts = append(parts, `<a href="`+html.EscapeString(replyLink)+`">`+ReplyLinkText+`</a>`)
+	}
+
+	return strings.Join(parts, "\n\n")
 }
 
 // PostLink builds a link a reader can follow back to the post itself. A public
