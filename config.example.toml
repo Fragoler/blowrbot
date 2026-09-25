@@ -31,3 +31,31 @@ draft_ttl = "1h"          # how long a "comment" tap stays valid
 # The bot's first comment under every post, the one carrying the button.
 # Leave empty for the built-in wording.
 invite_text = "Комментарии к этому посту анонимные. Нажмите кнопку ниже, выберите маску — и пишите."
+
+# The curated mask list. Editing it is a config change and a restart — no
+# migration. A label is stored on every comment published under it, so renaming
+# one here does not rewrite messages already in the channel. A label must fit
+# Telegram's 64-byte callback_data limit once "nick:" is prepended.
+[[nicknames]]
+label = "Лис"
+emoji = "🦊"
+
+[[nicknames]]
+label = "Сова"
+emoji = "🦉"
+
+[[nicknames]]
+label = "Ёж"
+emoji = "🦔"
+
+[[nicknames]]
+label = "Кит"
+emoji = "🐳"
+
+[[nicknames]]
+label = "Барсук"
+emoji = "🦡"
+
+[[nicknames]]
+label = "Выдра"
+emoji = "🦦"

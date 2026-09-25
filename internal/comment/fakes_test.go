@@ -15,18 +15,14 @@ var errBoom = errors.New("boom")
 type fakeRepo struct {
 	mu sync.Mutex
 
-	users     map[int64]comment.User
-	nicknames map[int64]comment.Nickname
-	order     []int64
-	posts     map[int]comment.Post
-	drafts    map[int64]comment.Draft
-	comments  map[int64]comment.Comment
+	users    map[int64]comment.User
+	posts    map[int]comment.Post
+	drafts   map[int64]comment.Draft
+	comments map[int64]comment.Comment
 
 	nextCommentID int64
 
 	ensureUserErr  error
-	nicknamesErr   error
-	nicknameErr    error
 	postErr        error
 	linkPostErr    error
 	markInviteErr  error
@@ -43,11 +39,10 @@ type fakeRepo struct {
 
 func newRepo() *fakeRepo {
 	return &fakeRepo{
-		users:     map[int64]comment.User{},
-		nicknames: map[int64]comment.Nickname{},
-		posts:     map[int]comment.Post{},
-		drafts:    map[int64]comment.Draft{},
-		comments:  map[int64]comment.Comment{},
+		users:    map[int64]comment.User{},
+		posts:    map[int]comment.Post{},
+		drafts:   map[int64]comment.Draft{},
+		comments: map[int64]comment.Comment{},
 	}
 }
 
@@ -60,13 +55,6 @@ func (r *fakeRepo) record(name string) {
 
 func (r *fakeRepo) withUser(u comment.User) *fakeRepo {
 	r.users[u.ID] = u
-
-	return r
-}
-
-func (r *fakeRepo) withNickname(n comment.Nickname) *fakeRepo {
-	r.nicknames[n.ID] = n
-	r.order = append(r.order, n.ID)
 
 	return r
 }
@@ -99,7 +87,7 @@ func (r *fakeRepo) EnsureUser(_ context.Context, userID int64) (comment.User, er
 	return user, nil
 }
 
-func (r *fakeRepo) SetLastNickname(_ context.Context, userID, nicknameID int64) error {
+func (r *fakeRepo) SetLastNickname(_ context.Context, userID int64, nickname string) error {
 	r.record("SetLastNickname")
 
 	if r.lastNickErr != nil {
@@ -108,42 +96,10 @@ func (r *fakeRepo) SetLastNickname(_ context.Context, userID, nicknameID int64) 
 
 	user := r.users[userID]
 	user.ID = userID
-	user.LastNicknameID = nicknameID
+	user.LastNickname = nickname
 	r.users[userID] = user
 
 	return nil
-}
-
-func (r *fakeRepo) ActiveNicknames(context.Context) ([]comment.Nickname, error) {
-	r.record("ActiveNicknames")
-
-	if r.nicknamesErr != nil {
-		return nil, r.nicknamesErr
-	}
-
-	out := make([]comment.Nickname, 0, len(r.order))
-	for _, id := range r.order {
-		if n := r.nicknames[id]; n.Active {
-			out = append(out, n)
-		}
-	}
-
-	return out, nil
-}
-
-func (r *fakeRepo) Nickname(_ context.Context, id int64) (comment.Nickname, error) {
-	r.record("Nickname")
-
-	if r.nicknameErr != nil {
-		return comment.Nickname{}, r.nicknameErr
-	}
-
-	n, ok := r.nicknames[id]
-	if !ok {
-		return comment.Nickname{}, comment.ErrNotFound
-	}
-
-	return n, nil
 }
 
 func (r *fakeRepo) LinkPost(_ context.Context, post comment.Post) error {

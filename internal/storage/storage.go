@@ -60,56 +60,24 @@ func (s *Storage) EnsureUser(ctx context.Context, userID int64) (comment.User, e
 	const q = `
 INSERT INTO users (user_id) VALUES ($1)
 ON CONFLICT (user_id) DO UPDATE SET user_id = EXCLUDED.user_id
-RETURNING user_id, is_banned, COALESCE(last_nickname_id, 0)`
+RETURNING user_id, is_banned, COALESCE(last_nickname, '')`
 
 	var u comment.User
-	if err := s.pool.QueryRow(ctx, q, userID).Scan(&u.ID, &u.Banned, &u.LastNicknameID); err != nil {
+	if err := s.pool.QueryRow(ctx, q, userID).Scan(&u.ID, &u.Banned, &u.LastNickname); err != nil {
 		return comment.User{}, fmt.Errorf("ensure user %d: %w", userID, err)
 	}
 
 	return u, nil
 }
 
-func (s *Storage) SetLastNickname(ctx context.Context, userID, nicknameID int64) error {
-	const q = `UPDATE users SET last_nickname_id = $2 WHERE user_id = $1`
+func (s *Storage) SetLastNickname(ctx context.Context, userID int64, nickname string) error {
+	const q = `UPDATE users SET last_nickname = $2 WHERE user_id = $1`
 
-	if _, err := s.pool.Exec(ctx, q, userID, nicknameID); err != nil {
+	if _, err := s.pool.Exec(ctx, q, userID, nickname); err != nil {
 		return fmt.Errorf("set last nickname: %w", err)
 	}
 
 	return nil
-}
-
-func (s *Storage) ActiveNicknames(ctx context.Context) ([]comment.Nickname, error) {
-	const q = `SELECT id, label, emoji, is_active FROM nicknames WHERE is_active ORDER BY id`
-
-	rows, err := s.pool.Query(ctx, q)
-	if err != nil {
-		return nil, fmt.Errorf("active nicknames: %w", err)
-	}
-	defer rows.Close()
-
-	var out []comment.Nickname
-	for rows.Next() {
-		var n comment.Nickname
-		if err := rows.Scan(&n.ID, &n.Label, &n.Emoji, &n.Active); err != nil {
-			return nil, fmt.Errorf("scan nickname: %w", err)
-		}
-		out = append(out, n)
-	}
-
-	return out, rows.Err()
-}
-
-func (s *Storage) Nickname(ctx context.Context, id int64) (comment.Nickname, error) {
-	const q = `SELECT id, label, emoji, is_active FROM nicknames WHERE id = $1`
-
-	var n comment.Nickname
-	if err := s.pool.QueryRow(ctx, q, id).Scan(&n.ID, &n.Label, &n.Emoji, &n.Active); err != nil {
-		return comment.Nickname{}, notFound(err)
-	}
-
-	return n, nil
 }
 
 // LinkPost records the discussion-group copy of a channel post. It is called from
@@ -158,14 +126,14 @@ func (s *Storage) MarkInvitePosted(ctx context.Context, channelMessageID, invite
 
 func (s *Storage) SaveDraft(ctx context.Context, draft comment.Draft) error {
 	const q = `
-INSERT INTO comment_drafts (user_id, post_id, nickname_id, created_at)
+INSERT INTO comment_drafts (user_id, post_id, nickname, created_at)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (user_id) DO UPDATE
 SET post_id = EXCLUDED.post_id,
-    nickname_id = EXCLUDED.nickname_id,
+    nickname = EXCLUDED.nickname,
     created_at = EXCLUDED.created_at`
 
-	if _, err := s.pool.Exec(ctx, q, draft.UserID, draft.PostID, draft.NicknameID, draft.CreatedAt); err != nil {
+	if _, err := s.pool.Exec(ctx, q, draft.UserID, draft.PostID, draft.Nickname, draft.CreatedAt); err != nil {
 		return fmt.Errorf("save draft: %w", err)
 	}
 
@@ -173,10 +141,10 @@ SET post_id = EXCLUDED.post_id,
 }
 
 func (s *Storage) Draft(ctx context.Context, userID int64) (comment.Draft, error) {
-	const q = `SELECT user_id, post_id, nickname_id, created_at FROM comment_drafts WHERE user_id = $1`
+	const q = `SELECT user_id, post_id, nickname, created_at FROM comment_drafts WHERE user_id = $1`
 
 	var d comment.Draft
-	if err := s.pool.QueryRow(ctx, q, userID).Scan(&d.UserID, &d.PostID, &d.NicknameID, &d.CreatedAt); err != nil {
+	if err := s.pool.QueryRow(ctx, q, userID).Scan(&d.UserID, &d.PostID, &d.Nickname, &d.CreatedAt); err != nil {
 		return comment.Draft{}, notFound(err)
 	}
 
@@ -198,12 +166,12 @@ func (s *Storage) CreateComment(ctx context.Context, c comment.Comment) (int64, 
 	}
 
 	const q = `
-INSERT INTO comments (user_id, post_id, nickname_id, content_text, media_json, status, created_at)
+INSERT INTO comments (user_id, post_id, nickname, content_text, media_json, status, created_at)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING id`
 
 	var id int64
-	err = s.pool.QueryRow(ctx, q, c.UserID, c.PostID, c.NicknameID, c.Text, media, c.Status, c.CreatedAt).Scan(&id)
+	err = s.pool.QueryRow(ctx, q, c.UserID, c.PostID, c.Nickname, c.Text, media, c.Status, c.CreatedAt).Scan(&id)
 	if err != nil {
 		return 0, fmt.Errorf("create comment: %w", err)
 	}
@@ -223,22 +191,25 @@ func (s *Storage) MarkCommentPublished(ctx context.Context, id int64, messageID 
 	const update = `
 UPDATE comments SET message_id_in_group = $2, status = $3
 WHERE id = $1
-RETURNING user_id, nickname_id`
+RETURNING user_id, nickname`
 
-	var userID, nicknameID int64
-	if err := tx.QueryRow(ctx, update, id, messageID, comment.StatusPublished).Scan(&userID, &nicknameID); err != nil {
+	var (
+		userID   int64
+		nickname string
+	)
+	if err := tx.QueryRow(ctx, update, id, messageID, comment.StatusPublished).Scan(&userID, &nickname); err != nil {
 		return fmt.Errorf("mark comment %d published: %w", id, notFound(err))
 	}
 
 	const identity = `
-INSERT INTO identity_map (message_id_in_group, comment_id, user_id, nickname_id)
+INSERT INTO identity_map (message_id_in_group, comment_id, user_id, nickname)
 VALUES ($1, $2, $3, $4)
 ON CONFLICT (message_id_in_group) DO UPDATE
 SET comment_id = EXCLUDED.comment_id,
     user_id = EXCLUDED.user_id,
-    nickname_id = EXCLUDED.nickname_id`
+    nickname = EXCLUDED.nickname`
 
-	if _, err := tx.Exec(ctx, identity, messageID, id, userID, nicknameID); err != nil {
+	if _, err := tx.Exec(ctx, identity, messageID, id, userID, nickname); err != nil {
 		return fmt.Errorf("record identity for comment %d: %w", id, err)
 	}
 

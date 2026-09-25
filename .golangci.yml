@@ -51,20 +51,24 @@ linters:
           - gosec
         path: test # Excludes /test, *_test.go etc.
     paths:
-      - internal
-      - pkg/registry
       - third_party$
       - builtin$
       - examples$
 formatters:
   enable:
-    - gofmt
-    - goimports
+    - gofumpt
+    - gci
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+    gofumpt:
+      module-path: loudbot
   exclusions:
     generated: lax
     paths:
-      - internal
-      - pkg/registry
       - third_party$
       - builtin$
       - examples$

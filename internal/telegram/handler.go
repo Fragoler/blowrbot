@@ -121,7 +121,7 @@ func (b *Bot) onStart(ctx context.Context, msg *models.Message, payload string) 
 	_, err = b.api.SendMessage(ctx, &tgbot.SendMessageParams{
 		ChatID:      msg.Chat.ID,
 		Text:        msgChooseNickname,
-		ReplyMarkup: nicknameKeyboard(result.Nicknames, result.Selected.ID),
+		ReplyMarkup: nicknameKeyboard(result.Nicknames, result.Selected.Label),
 	})
 	if err != nil {
 		b.log.Error("send nickname keyboard", slog.Int64("user_id", userID), slog.Any("error", err))
@@ -160,8 +160,8 @@ func (b *Bot) onComment(ctx context.Context, msg *models.Message) {
 		slog.Int("message_id", published.MessageID),
 	)
 
-	mask := ""
-	if n, err := b.comments.NicknameByID(ctx, published.NicknameID); err == nil {
+	mask := published.Nickname
+	if n, err := b.comments.Nickname(published.Nickname); err == nil {
 		mask = n.Display()
 	}
 
@@ -180,14 +180,14 @@ func (b *Bot) onCallback(ctx context.Context, query *models.CallbackQuery) {
 }
 
 func (b *Bot) onNicknameChosen(ctx context.Context, query *models.CallbackQuery) {
-	nicknameID, err := comment.ParseNicknameCallback(query.Data)
+	label, err := comment.ParseNicknameCallback(query.Data)
 	if err != nil {
 		b.answer(ctx, query.ID, msgErrBadPayload)
 
 		return
 	}
 
-	nickname, err := b.comments.ChooseNickname(ctx, query.From.ID, nicknameID)
+	nickname, err := b.comments.ChooseNickname(ctx, query.From.ID, label)
 	if err != nil {
 		b.logCoreError("choose nickname", query.From.ID, err)
 		b.answer(ctx, query.ID, userMessage(err))
@@ -196,16 +196,16 @@ func (b *Bot) onNicknameChosen(ctx context.Context, query *models.CallbackQuery)
 	}
 
 	b.answer(ctx, query.ID, fmt.Sprintf(msgNicknameSet, nickname.Display()))
-	b.refreshNicknameKeyboard(ctx, query, nicknameID)
+	b.refreshNicknameKeyboard(ctx, query, nickname.Label)
 }
 
 // refreshNicknameKeyboard re-renders the keyboard so the chosen mask is ticked.
-func (b *Bot) refreshNicknameKeyboard(ctx context.Context, query *models.CallbackQuery, selected int64) {
+func (b *Bot) refreshNicknameKeyboard(ctx context.Context, query *models.CallbackQuery, selected string) {
 	if query.Message.Message == nil {
 		return
 	}
 
-	nicknames, err := b.comments.Nicknames(ctx)
+	nicknames, err := b.comments.Nicknames()
 	if err != nil {
 		b.log.Error("reload nicknames", slog.Any("error", err))
 
@@ -255,19 +255,19 @@ func startPayload(text string) (string, bool) {
 	return strings.TrimSpace(strings.TrimPrefix(text, startCommand)), true
 }
 
-func nicknameKeyboard(nicknames []comment.Nickname, selected int64) models.InlineKeyboardMarkup {
+func nicknameKeyboard(nicknames []comment.Nickname, selected string) models.InlineKeyboardMarkup {
 	const perRow = 2
 
 	rows := make([][]models.InlineKeyboardButton, 0, len(nicknames)/perRow+1)
 	row := make([]models.InlineKeyboardButton, 0, perRow)
 
 	for _, n := range nicknames {
-		label := n.Display()
-		if n.ID == selected {
-			label = "✅ " + label
+		text := n.Display()
+		if n.Label == selected {
+			text = "✅ " + text
 		}
 
-		row = append(row, models.InlineKeyboardButton{Text: label, CallbackData: comment.NicknameCallback(n.ID)})
+		row = append(row, models.InlineKeyboardButton{Text: text, CallbackData: comment.NicknameCallback(n.Label)})
 		if len(row) == perRow {
 			rows = append(rows, row)
 			row = make([]models.InlineKeyboardButton, 0, perRow)

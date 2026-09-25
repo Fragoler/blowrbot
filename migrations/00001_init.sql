@@ -1,22 +1,15 @@
 -- +goose Up
 
+-- The nickname list lives in config.toml, not here: editing it is a config change
+-- and a restart, with no migration. Every table below therefore stores the chosen
+-- label as plain TEXT rather than a foreign key, so a mask dropped from the config
+-- never rewrites or breaks a message already published under it.
 CREATE TABLE users (
-    user_id          BIGINT PRIMARY KEY,
-    first_seen       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    is_banned        BOOLEAN     NOT NULL DEFAULT FALSE,
-    last_nickname_id BIGINT
+    user_id       BIGINT PRIMARY KEY,
+    first_seen    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    is_banned     BOOLEAN     NOT NULL DEFAULT FALSE,
+    last_nickname TEXT
 );
-
-CREATE TABLE nicknames (
-    id        BIGSERIAL PRIMARY KEY,
-    label     TEXT    NOT NULL UNIQUE,
-    emoji     TEXT    NOT NULL DEFAULT '',
-    is_active BOOLEAN NOT NULL DEFAULT TRUE
-);
-
-ALTER TABLE users
-    ADD CONSTRAINT users_last_nickname_fk
-    FOREIGN KEY (last_nickname_id) REFERENCES nicknames (id) ON DELETE SET NULL;
 
 -- posts links a channel post to its auto-forwarded copy in the discussion group;
 -- replying to that copy is what puts a comment into the post's thread.
@@ -29,17 +22,17 @@ CREATE TABLE posts (
 );
 
 CREATE TABLE comment_drafts (
-    user_id     BIGINT PRIMARY KEY REFERENCES users (user_id) ON DELETE CASCADE,
-    post_id     INTEGER     NOT NULL,
-    nickname_id BIGINT      NOT NULL REFERENCES nicknames (id),
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+    user_id    BIGINT PRIMARY KEY REFERENCES users (user_id) ON DELETE CASCADE,
+    post_id    INTEGER     NOT NULL,
+    nickname   TEXT        NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE comments (
     id                  BIGSERIAL PRIMARY KEY,
     user_id             BIGINT      NOT NULL REFERENCES users (user_id),
     post_id             INTEGER     NOT NULL,
-    nickname_id         BIGINT      NOT NULL REFERENCES nicknames (id),
+    nickname            TEXT        NOT NULL,
     message_id_in_group INTEGER,
     content_text        TEXT        NOT NULL DEFAULT '',
     media_json          JSONB       NOT NULL DEFAULT '[]'::jsonb,
@@ -80,7 +73,7 @@ CREATE TABLE identity_map (
     message_id_in_group INTEGER PRIMARY KEY,
     comment_id          BIGINT      NOT NULL REFERENCES comments (id) ON DELETE CASCADE,
     user_id             BIGINT      NOT NULL REFERENCES users (user_id),
-    nickname_id         BIGINT      NOT NULL REFERENCES nicknames (id),
+    nickname            TEXT        NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -93,19 +86,6 @@ CREATE TABLE audit_log (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- The nickname list ships with the schema: the bot cannot publish a comment
--- without at least one mask, so seeding it separately would leave a broken state
--- between the two migrations.
-INSERT INTO nicknames (label, emoji) VALUES
-    ('Лис', '🦊'),
-    ('Сова', '🦉'),
-    ('Ёж', '🦔'),
-    ('Кит', '🐳'),
-    ('Барсук', '🦡'),
-    ('Ворон', '🐦‍⬛'),
-    ('Выдра', '🦦'),
-    ('Тушканчик', '🐁');
-
 -- +goose Down
 
 DROP TABLE audit_log;
@@ -115,6 +95,4 @@ DROP TABLE suggested_posts;
 DROP TABLE comments;
 DROP TABLE comment_drafts;
 DROP TABLE posts;
-ALTER TABLE users DROP CONSTRAINT users_last_nickname_fk;
-DROP TABLE nicknames;
 DROP TABLE users;

@@ -34,17 +34,19 @@ const (
 )
 
 type User struct {
-	ID             int64
-	Banned         bool
-	LastNicknameID int64
+	ID     int64
+	Banned bool
+	// LastNickname is the label last worn by this user, or empty for a new one.
+	LastNickname string
 }
 
-// Nickname is one entry of the curated mask list.
+// Nickname is one entry of the curated mask list. The list lives in config.toml,
+// not in the database: editing it is a config change and a restart, no migration.
+// Label is the identity — it is what gets stored on a published comment, so a mask
+// later dropped from the config does not rewrite messages already in the channel.
 type Nickname struct {
-	ID     int64
-	Label  string
-	Emoji  string
-	Active bool
+	Label string
+	Emoji string
 }
 
 // Display renders the mask as readers see it in the discussion group.
@@ -76,10 +78,10 @@ type Post struct {
 
 // Draft is what a user is currently composing: which post, under which mask.
 type Draft struct {
-	UserID     int64
-	PostID     int
-	NicknameID int64
-	CreatedAt  time.Time
+	UserID    int64
+	PostID    int
+	Nickname  string
+	CreatedAt time.Time
 }
 
 type Media struct {
@@ -89,10 +91,10 @@ type Media struct {
 }
 
 type Comment struct {
-	ID         int64
-	UserID     int64
-	PostID     int
-	NicknameID int64
+	ID       int64
+	UserID   int64
+	PostID   int
+	Nickname string
 	// MessageID is the id of the published message inside the discussion group.
 	MessageID int
 	Text      string
@@ -105,10 +107,7 @@ type Comment struct {
 // ErrNotFound (wrapped or bare) when a row is missing.
 type Repository interface {
 	EnsureUser(ctx context.Context, userID int64) (User, error)
-	SetLastNickname(ctx context.Context, userID, nicknameID int64) error
-
-	ActiveNicknames(ctx context.Context) ([]Nickname, error)
-	Nickname(ctx context.Context, id int64) (Nickname, error)
+	SetLastNickname(ctx context.Context, userID int64, nickname string) error
 
 	LinkPost(ctx context.Context, post Post) error
 	Post(ctx context.Context, channelMessageID int) (Post, error)

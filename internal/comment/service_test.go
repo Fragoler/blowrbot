@@ -20,8 +20,8 @@ const (
 )
 
 var (
-	fox = comment.Nickname{ID: 1, Label: "Лис", Emoji: "🦊", Active: true}
-	owl = comment.Nickname{ID: 2, Label: "Сова", Emoji: "🦉", Active: true}
+	fox = comment.Nickname{Label: "Лис", Emoji: "🦊"}
+	owl = comment.Nickname{Label: "Сова", Emoji: "🦉"}
 
 	now = time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 )
@@ -29,6 +29,7 @@ var (
 func testOptions() comment.Options {
 	return comment.Options{
 		BotUsername:       "anon_bot",
+		Nicknames:         []comment.Nickname{fox, owl},
 		MaxTextLen:        10,
 		NicknameSeparator: ": ",
 		DraftTTL:          time.Hour,
@@ -44,12 +45,11 @@ func newService(t *testing.T, repo *fakeRepo, pub *fakePublisher, guard comment.
 	return svc
 }
 
-// fullRepo is the happy-path world: an active user, two masks and a post with a thread.
+// fullRepo is the happy-path world: an active user and a post with a thread.
+// The masks come from Options, not from the repository.
 func fullRepo() *fakeRepo {
 	return newRepo().
 		withUser(comment.User{ID: userID}).
-		withNickname(fox).
-		withNickname(owl).
 		withPost(comment.Post{
 			ChannelMessageID:    postID,
 			DiscussionChatID:    discussionID,
@@ -71,17 +71,17 @@ func TestStartOpensDraft(t *testing.T) {
 	assert.Equal(t, fox, got.Selected, "first active mask is preselected for a new user")
 
 	assert.Equal(t, comment.Draft{
-		UserID:     userID,
-		PostID:     postID,
-		NicknameID: fox.ID,
-		CreatedAt:  now,
+		UserID:    userID,
+		PostID:    postID,
+		Nickname:  fox.Label,
+		CreatedAt: now,
 	}, repo.drafts[userID])
 }
 
 func TestStartPreselectsLastNickname(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withUser(comment.User{ID: userID, LastNicknameID: owl.ID})
+	repo := fullRepo().withUser(comment.User{ID: userID, LastNickname: owl.Label})
 	svc := newService(t, repo, &fakePublisher{}, nil)
 
 	got, err := svc.Start(context.Background(), userID, "comment_42")
@@ -92,24 +92,13 @@ func TestStartPreselectsLastNickname(t *testing.T) {
 func TestStartFallsBackWhenLastNicknameIsGone(t *testing.T) {
 	t.Parallel()
 
-	// The mask the user last wore was disabled by an admin.
-	repo := fullRepo().withUser(comment.User{ID: userID, LastNicknameID: 99})
+	// The mask the user last wore was dropped from the config.
+	repo := fullRepo().withUser(comment.User{ID: userID, LastNickname: "Мамонт"})
 	svc := newService(t, repo, &fakePublisher{}, nil)
 
 	got, err := svc.Start(context.Background(), userID, "comment_42")
 	require.NoError(t, err)
 	assert.Equal(t, fox, got.Selected)
-}
-
-func TestStartOmitsInactiveNicknames(t *testing.T) {
-	t.Parallel()
-
-	repo := fullRepo().withNickname(comment.Nickname{ID: 3, Label: "Ёж", Active: false})
-	svc := newService(t, repo, &fakePublisher{}, nil)
-
-	got, err := svc.Start(context.Background(), userID, "comment_42")
-	require.NoError(t, err)
-	assert.Equal(t, []comment.Nickname{fox, owl}, got.Nicknames)
 }
 
 func TestStartErrors(t *testing.T) {
@@ -148,18 +137,8 @@ func TestStartErrors(t *testing.T) {
 			wantErr: comment.ErrUnknownPost,
 		},
 		{
-			name: "no active nicknames",
-			repo: func() *fakeRepo {
-				return newRepo().
-					withUser(comment.User{ID: userID}).
-					withPost(comment.Post{ChannelMessageID: postID, DiscussionChatID: discussionID, DiscussionMessageID: threadMsgID})
-			},
-			payload: "comment_42",
-			wantErr: comment.ErrNoNicknames,
-		},
-		{
 			name:    "repository failure",
-			repo:    func() *fakeRepo { r := fullRepo(); r.nicknamesErr = errBoom; return r },
+			repo:    func() *fakeRepo { r := fullRepo(); r.ensureUserErr = errBoom; return r },
 			payload: "comment_42",
 			wantErr: errBoom,
 		},
@@ -182,58 +161,55 @@ func TestStartErrors(t *testing.T) {
 func TestChooseNickname(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, NicknameID: fox.ID, CreatedAt: now})
+	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
 	svc := newService(t, repo, &fakePublisher{}, nil)
 
-	got, err := svc.ChooseNickname(context.Background(), userID, owl.ID)
+	got, err := svc.ChooseNickname(context.Background(), userID, owl.Label)
 	require.NoError(t, err)
 	assert.Equal(t, owl, got)
-	assert.Equal(t, owl.ID, repo.drafts[userID].NicknameID)
+	assert.Equal(t, owl.Label, repo.drafts[userID].Nickname)
 	assert.Equal(t, postID, repo.drafts[userID].PostID, "switching the mask keeps the draft's post")
 }
 
 func TestChooseNicknameErrors(t *testing.T) {
 	t.Parallel()
 
-	openDraft := comment.Draft{UserID: userID, PostID: postID, NicknameID: fox.ID, CreatedAt: now}
+	openDraft := comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now}
 
 	cases := []struct {
-		name       string
-		repo       func() *fakeRepo
-		nicknameID int64
-		wantErr    error
+		name     string
+		repo     func() *fakeRepo
+		nickname string
+		wantErr  error
 	}{
 		{
-			name:       "no draft",
-			repo:       fullRepo,
-			nicknameID: owl.ID,
-			wantErr:    comment.ErrNoDraft,
+			name:     "no draft",
+			repo:     fullRepo,
+			nickname: owl.Label,
+			wantErr:  comment.ErrNoDraft,
 		},
 		{
 			name: "expired draft",
 			repo: func() *fakeRepo {
 				d := openDraft
 				d.CreatedAt = now.Add(-2 * time.Hour)
+
 				return fullRepo().withDraft(d)
 			},
-			nicknameID: owl.ID,
-			wantErr:    comment.ErrDraftExpired,
+			nickname: owl.Label,
+			wantErr:  comment.ErrDraftExpired,
 		},
 		{
-			name:       "unknown nickname",
-			repo:       func() *fakeRepo { return fullRepo().withDraft(openDraft) },
-			nicknameID: 404,
-			wantErr:    comment.ErrNicknameUnavailable,
+			name:     "mask not in the config list",
+			repo:     func() *fakeRepo { return fullRepo().withDraft(openDraft) },
+			nickname: "Мамонт",
+			wantErr:  comment.ErrNicknameUnavailable,
 		},
 		{
-			name: "disabled nickname",
-			repo: func() *fakeRepo {
-				return fullRepo().
-					withDraft(openDraft).
-					withNickname(comment.Nickname{ID: 3, Label: "Ёж", Active: false})
-			},
-			nicknameID: 3,
-			wantErr:    comment.ErrNicknameUnavailable,
+			name:     "empty label",
+			repo:     func() *fakeRepo { return fullRepo().withDraft(openDraft) },
+			nickname: "",
+			wantErr:  comment.ErrNicknameUnavailable,
 		},
 	}
 
@@ -243,7 +219,7 @@ func TestChooseNicknameErrors(t *testing.T) {
 
 			svc := newService(t, tc.repo(), &fakePublisher{}, nil)
 
-			_, err := svc.ChooseNickname(context.Background(), userID, tc.nicknameID)
+			_, err := svc.ChooseNickname(context.Background(), userID, tc.nickname)
 			require.ErrorIs(t, err, tc.wantErr)
 		})
 	}
@@ -253,10 +229,10 @@ func TestExpiredDraftIsDropped(t *testing.T) {
 	t.Parallel()
 
 	repo := fullRepo().withDraft(comment.Draft{
-		UserID:     userID,
-		PostID:     postID,
-		NicknameID: fox.ID,
-		CreatedAt:  now.Add(-2 * time.Hour),
+		UserID:    userID,
+		PostID:    postID,
+		Nickname:  fox.Label,
+		CreatedAt: now.Add(-2 * time.Hour),
 	})
 	svc := newService(t, repo, &fakePublisher{}, nil)
 
@@ -269,10 +245,10 @@ func TestDraftAtExactTTLIsStillValid(t *testing.T) {
 	t.Parallel()
 
 	repo := fullRepo().withDraft(comment.Draft{
-		UserID:     userID,
-		PostID:     postID,
-		NicknameID: fox.ID,
-		CreatedAt:  now.Add(-time.Hour),
+		UserID:    userID,
+		PostID:    postID,
+		Nickname:  fox.Label,
+		CreatedAt: now.Add(-time.Hour),
 	})
 	svc := newService(t, repo, &fakePublisher{result: comment.PublishResult{MessageID: 1}}, nil)
 
@@ -283,7 +259,7 @@ func TestDraftAtExactTTLIsStillValid(t *testing.T) {
 func TestSubmitPublishesAndRecords(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, NicknameID: owl.ID, CreatedAt: now})
+	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: owl.Label, CreatedAt: now})
 	pub := &fakePublisher{result: comment.PublishResult{MessageID: 555}}
 	guard := &recordingGuard{}
 	svc := newService(t, repo, pub, guard)
@@ -300,7 +276,7 @@ func TestSubmitPublishesAndRecords(t *testing.T) {
 	assert.Equal(t, comment.StatusPublished, got.Status)
 	assert.Equal(t, 555, got.MessageID)
 	assert.Equal(t, "привет", got.Text, "the stored text is trimmed and carries no mask prefix")
-	assert.Equal(t, owl.ID, got.NicknameID)
+	assert.Equal(t, owl.Label, got.Nickname)
 	assert.Equal(t, postID, got.PostID)
 	assert.NotZero(t, got.ID)
 
@@ -325,14 +301,14 @@ func TestSubmitPublishesAndRecords(t *testing.T) {
 	assert.Equal(t, comment.StatusPublished, stored.Status)
 	assert.Equal(t, 555, stored.MessageID)
 
-	assert.Equal(t, owl.ID, repo.users[userID].LastNicknameID, "the mask is remembered for the next comment")
+	assert.Equal(t, owl.Label, repo.users[userID].LastNickname, "the mask is remembered for the next comment")
 	assert.Empty(t, repo.drafts, "a published comment closes the draft")
 }
 
 func TestSubmitMediaOnly(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, NicknameID: fox.ID, CreatedAt: now})
+	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
 	pub := &fakePublisher{result: comment.PublishResult{MessageID: 1}}
 	svc := newService(t, repo, pub, nil)
 
@@ -349,7 +325,7 @@ func TestSubmitMediaOnly(t *testing.T) {
 func TestSubmitCountsRunesNotBytes(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, NicknameID: fox.ID, CreatedAt: now})
+	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
 	pub := &fakePublisher{result: comment.PublishResult{MessageID: 1}}
 	svc := newService(t, repo, pub, nil)
 
@@ -357,7 +333,7 @@ func TestSubmitCountsRunesNotBytes(t *testing.T) {
 	_, err := svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: strings.Repeat("я", 10)})
 	require.NoError(t, err)
 
-	repo.withDraft(comment.Draft{UserID: userID, PostID: postID, NicknameID: fox.ID, CreatedAt: now})
+	repo.withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
 
 	_, err = svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: strings.Repeat("я", 11)})
 	require.ErrorIs(t, err, comment.ErrTextTooLong)
@@ -366,7 +342,7 @@ func TestSubmitCountsRunesNotBytes(t *testing.T) {
 func TestSubmitRejectedByGuard(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, NicknameID: fox.ID, CreatedAt: now})
+	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
 	pub := &fakePublisher{}
 	guard := &blockingGuard{reason: "слишком часто"}
 	svc := newService(t, repo, pub, guard)
@@ -385,7 +361,7 @@ func TestSubmitRejectedByGuard(t *testing.T) {
 func TestSubmitMarksCommentFailedWhenTelegramRefuses(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, NicknameID: fox.ID, CreatedAt: now})
+	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
 	pub := &fakePublisher{err: errBoom}
 	svc := newService(t, repo, pub, nil)
 
@@ -403,7 +379,7 @@ func TestSubmitMarksCommentFailedWhenTelegramRefuses(t *testing.T) {
 func TestSubmitErrors(t *testing.T) {
 	t.Parallel()
 
-	openDraft := comment.Draft{UserID: userID, PostID: postID, NicknameID: fox.ID, CreatedAt: now}
+	openDraft := comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now}
 
 	cases := []struct {
 		name    string
@@ -440,20 +416,18 @@ func TestSubmitErrors(t *testing.T) {
 		{
 			name: "post deleted while composing",
 			repo: func() *fakeRepo {
-				r := newRepo().withUser(comment.User{ID: userID}).withNickname(fox).withDraft(openDraft)
-
-				return r
+				return newRepo().withUser(comment.User{ID: userID}).withDraft(openDraft)
 			},
 			req:     comment.SubmitRequest{UserID: userID, Text: "hi"},
 			wantErr: comment.ErrUnknownPost,
 		},
 		{
-			name: "nickname disabled while composing",
+			name: "mask dropped from the config while composing",
 			repo: func() *fakeRepo {
-				r := fullRepo().withDraft(openDraft)
-				r.nicknames[fox.ID] = comment.Nickname{ID: fox.ID, Label: fox.Label, Active: false}
+				d := openDraft
+				d.Nickname = "Мамонт"
 
-				return r
+				return fullRepo().withDraft(d)
 			},
 			req:     comment.SubmitRequest{UserID: userID, Text: "hi"},
 			wantErr: comment.ErrNicknameUnavailable,
@@ -484,7 +458,7 @@ func TestSubmitErrors(t *testing.T) {
 func TestSubmitValidatesBeforeTouchingTelegram(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, NicknameID: fox.ID, CreatedAt: now})
+	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
 	guard := &recordingGuard{}
 	pub := &fakePublisher{}
 	svc := newService(t, repo, pub, guard)
@@ -504,11 +478,15 @@ func TestServiceDeepLinkUsesConfiguredUsername(t *testing.T) {
 func TestDefaultsAreApplied(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, NicknameID: fox.ID, CreatedAt: now})
+	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
 	pub := &fakePublisher{result: comment.PublishResult{MessageID: 1}}
 
-	// Zero Options must not reject every comment via a zero-length limit.
-	svc := comment.New(repo, pub, nil, comment.Options{BotUsername: "anon_bot"})
+	// The mask list is required input; everything else must fall back to a default
+	// rather than rejecting every comment via a zero-length limit.
+	svc := comment.New(repo, pub, nil, comment.Options{
+		BotUsername: "anon_bot",
+		Nicknames:   []comment.Nickname{fox, owl},
+	})
 	svc.SetClock(func() time.Time { return now })
 
 	_, err := svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: "hi"})
@@ -521,25 +499,36 @@ func TestNicknames(t *testing.T) {
 
 	svc := newService(t, fullRepo(), &fakePublisher{}, nil)
 
-	got, err := svc.Nicknames(context.Background())
+	got, err := svc.Nicknames()
 	require.NoError(t, err)
 	assert.Equal(t, []comment.Nickname{fox, owl}, got)
-
-	empty := newService(t, newRepo(), &fakePublisher{}, nil)
-	_, err = empty.Nicknames(context.Background())
-	require.ErrorIs(t, err, comment.ErrNoNicknames)
 }
 
-func TestNicknameByID(t *testing.T) {
+func TestNicknamesEmptyConfig(t *testing.T) {
+	t.Parallel()
+
+	opts := testOptions()
+	opts.Nicknames = nil
+
+	svc := comment.New(fullRepo(), &fakePublisher{}, nil, opts)
+
+	_, err := svc.Nicknames()
+	require.ErrorIs(t, err, comment.ErrNoNicknames)
+
+	_, err = svc.Start(context.Background(), userID, "comment_42")
+	require.ErrorIs(t, err, comment.ErrNoNicknames, "a config with no masks must refuse the flow, not panic")
+}
+
+func TestNicknameLookup(t *testing.T) {
 	t.Parallel()
 
 	svc := newService(t, fullRepo(), &fakePublisher{}, nil)
 
-	got, err := svc.NicknameByID(context.Background(), owl.ID)
+	got, err := svc.Nickname(owl.Label)
 	require.NoError(t, err)
 	assert.Equal(t, owl, got)
 
-	_, err = svc.NicknameByID(context.Background(), 404)
+	_, err = svc.Nickname("Мамонт")
 	require.ErrorIs(t, err, comment.ErrNicknameUnavailable)
 }
 

@@ -17,7 +17,9 @@ const (
 
 // Options are the tunables the service reads from config.
 type Options struct {
-	BotUsername       string
+	BotUsername string
+	// Nicknames is the mask list from config.toml, in the order it is offered.
+	Nicknames         []Nickname
 	MaxTextLen        int
 	NicknameSeparator string
 	// DraftTTL bounds how long a deep-link tap stays valid, so that an old draft
@@ -98,22 +100,18 @@ func (s *Service) Start(ctx context.Context, userID int64, payload string) (Star
 		return StartResult{}, err
 	}
 
-	nicknames, err := s.repo.ActiveNicknames(ctx)
+	nicknames, err := s.Nicknames()
 	if err != nil {
-		return StartResult{}, fmt.Errorf("active nicknames: %w", err)
+		return StartResult{}, err
 	}
 
-	if len(nicknames) == 0 {
-		return StartResult{}, ErrNoNicknames
-	}
-
-	selected := preselect(nicknames, user.LastNicknameID)
+	selected := preselect(nicknames, user.LastNickname)
 
 	draft := Draft{
-		UserID:     userID,
-		PostID:     postID,
-		NicknameID: selected.ID,
-		CreatedAt:  s.now(),
+		UserID:    userID,
+		PostID:    postID,
+		Nickname:  selected.Label,
+		CreatedAt: s.now(),
 	}
 	if err := s.repo.SaveDraft(ctx, draft); err != nil {
 		return StartResult{}, fmt.Errorf("save draft: %w", err)
@@ -123,18 +121,18 @@ func (s *Service) Start(ctx context.Context, userID int64, payload string) (Star
 }
 
 // ChooseNickname switches the mask of the open draft.
-func (s *Service) ChooseNickname(ctx context.Context, userID, nicknameID int64) (Nickname, error) {
+func (s *Service) ChooseNickname(ctx context.Context, userID int64, label string) (Nickname, error) {
 	draft, err := s.draft(ctx, userID)
 	if err != nil {
 		return Nickname{}, err
 	}
 
-	nickname, err := s.nickname(ctx, nicknameID)
+	nickname, err := s.Nickname(label)
 	if err != nil {
 		return Nickname{}, err
 	}
 
-	draft.NicknameID = nickname.ID
+	draft.Nickname = nickname.Label
 	if err := s.repo.SaveDraft(ctx, draft); err != nil {
 		return Nickname{}, fmt.Errorf("save draft: %w", err)
 	}
@@ -172,7 +170,7 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (Comment, error
 		return Comment{}, err
 	}
 
-	nickname, err := s.nickname(ctx, draft.NicknameID)
+	nickname, err := s.Nickname(draft.Nickname)
 	if err != nil {
 		return Comment{}, err
 	}
@@ -188,13 +186,13 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (Comment, error
 	}
 
 	c := Comment{
-		UserID:     req.UserID,
-		PostID:     draft.PostID,
-		NicknameID: nickname.ID,
-		Text:       text,
-		Media:      req.Media,
-		Status:     StatusPending,
-		CreatedAt:  s.now(),
+		UserID:    req.UserID,
+		PostID:    draft.PostID,
+		Nickname:  nickname.Label,
+		Text:      text,
+		Media:     req.Media,
+		Status:    StatusPending,
+		CreatedAt: s.now(),
 	}
 
 	id, err := s.repo.CreateComment(ctx, c)
@@ -222,7 +220,7 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (Comment, error
 		return Comment{}, fmt.Errorf("mark comment published: %w", err)
 	}
 
-	if err := s.repo.SetLastNickname(ctx, req.UserID, nickname.ID); err != nil {
+	if err := s.repo.SetLastNickname(ctx, req.UserID, nickname.Label); err != nil {
 		return Comment{}, fmt.Errorf("set last nickname: %w", err)
 	}
 
@@ -300,50 +298,36 @@ func (s *Service) post(ctx context.Context, channelMessageID int) (Post, error) 
 	return post, nil
 }
 
-func (s *Service) nickname(ctx context.Context, id int64) (Nickname, error) {
-	nickname, err := s.repo.Nickname(ctx, id)
-	switch {
-	case errors.Is(err, ErrNotFound):
-		return Nickname{}, fmt.Errorf("%w: %d", ErrNicknameUnavailable, id)
-	case err != nil:
-		return Nickname{}, fmt.Errorf("nickname: %w", err)
+// Nickname resolves a label against the configured list. A label that is no
+// longer there — dropped from the config while a draft was open — is refused.
+func (s *Service) Nickname(label string) (Nickname, error) {
+	for _, n := range s.opts.Nicknames {
+		if n.Label == label {
+			return n, nil
+		}
 	}
 
-	if !nickname.Active {
-		return Nickname{}, fmt.Errorf("%w: %d is disabled", ErrNicknameUnavailable, id)
+	return Nickname{}, fmt.Errorf("%w: %q", ErrNicknameUnavailable, label)
+}
+
+// Nicknames returns the masks currently offered to authors.
+func (s *Service) Nicknames() ([]Nickname, error) {
+	if len(s.opts.Nicknames) == 0 {
+		return nil, ErrNoNicknames
 	}
 
-	return nickname, nil
+	return s.opts.Nicknames, nil
 }
 
 // preselect keeps the last used mask when it is still on the list.
-func preselect(nicknames []Nickname, lastID int64) Nickname {
+func preselect(nicknames []Nickname, last string) Nickname {
 	for _, n := range nicknames {
-		if n.ID == lastID {
+		if n.Label == last {
 			return n
 		}
 	}
 
 	return nicknames[0]
-}
-
-// Nicknames returns the masks currently offered authors
-func (s *Service) Nicknames(ctx context.Context) ([]Nickname, error) {
-	nicknames, err := s.repo.ActiveNicknames(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("active nicknames: %w", err)
-	}
-
-	if len(nicknames) == 0 {
-		return nil, ErrNoNicknames
-	}
-
-	return nicknames, nil
-}
-
-// NicknameByID resolves one active mask.
-func (s *Service) NicknameByID(ctx context.Context, id int64) (Nickname, error) {
-	return s.nickname(ctx, id)
 }
 
 // OnPostPublished records the discussion-group anchor of a new channel post and

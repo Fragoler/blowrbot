@@ -43,27 +43,34 @@ func TestNicknameKeyboard(t *testing.T) {
 	t.Parallel()
 
 	nicknames := []comment.Nickname{
-		{ID: 1, Label: "Лис", Emoji: "🦊"},
-		{ID: 2, Label: "Сова", Emoji: "🦉"},
-		{ID: 3, Label: "Ёж", Emoji: "🦔"},
+		{Label: "Лис", Emoji: "🦊"},
+		{Label: "Сова", Emoji: "🦉"},
+		{Label: "Ёж", Emoji: "🦔"},
 	}
 
-	markup := nicknameKeyboard(nicknames, 2)
+	markup := nicknameKeyboard(nicknames, "Сова")
 
 	require.Len(t, markup.InlineKeyboard, 2, "two per row leaves a trailing row of one")
 	assert.Equal(t, "🦊 Лис", markup.InlineKeyboard[0][0].Text)
 	assert.Equal(t, "✅ 🦉 Сова", markup.InlineKeyboard[0][1].Text, "the chosen mask is ticked")
 	assert.Equal(t, "🦔 Ёж", markup.InlineKeyboard[1][0].Text)
 
-	id, err := comment.ParseNicknameCallback(markup.InlineKeyboard[1][0].CallbackData)
+	label, err := comment.ParseNicknameCallback(markup.InlineKeyboard[1][0].CallbackData)
 	require.NoError(t, err)
-	assert.Equal(t, int64(3), id)
+	assert.Equal(t, "Ёж", label)
+
+	for _, row := range markup.InlineKeyboard {
+		for _, btn := range row {
+			assert.LessOrEqual(t, len(btn.CallbackData), comment.MaxCallbackLen,
+				"Telegram drops a button whose callback_data overflows")
+		}
+	}
 }
 
 func TestNicknameKeyboardEmpty(t *testing.T) {
 	t.Parallel()
 
-	assert.Empty(t, nicknameKeyboard(nil, 0).InlineKeyboard)
+	assert.Empty(t, nicknameKeyboard(nil, "").InlineKeyboard)
 }
 
 func TestExtractMedia(t *testing.T) {

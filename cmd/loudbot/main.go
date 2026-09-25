@@ -69,6 +69,7 @@ func run(configPath string) error {
 	// Antiabuse is not wired yet, so the core runs with a permissive guard.
 	comments := comment.New(store, bot.Publisher(), comment.AllowAll{}, comment.Options{
 		BotUsername:       cfg.Telegram.BotUsername,
+		Nicknames:         nicknames(cfg),
 		MaxTextLen:        cfg.Comments.MaxTextLen,
 		NicknameSeparator: cfg.Comments.NicknameSeparator,
 		DraftTTL:          ttl,
@@ -76,6 +77,17 @@ func run(configPath string) error {
 	bot.UseComments(comments)
 
 	return bot.Run(ctx)
+}
+
+// nicknames maps the config entries onto the core's own type, keeping config out
+// of the comment package's imports.
+func nicknames(cfg config.Config) []comment.Nickname {
+	out := make([]comment.Nickname, 0, len(cfg.Nicknames))
+	for _, n := range cfg.Nicknames {
+		out = append(out, comment.Nickname{Label: n.Label, Emoji: n.Emoji})
+	}
+
+	return out
 }
 
 func newLogger(level slog.Level) *slog.Logger {

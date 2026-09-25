@@ -62,7 +62,7 @@ func testConfig(t *testing.T) config.Postgres {
 }
 
 // probe is an independent connection used to assert on rows the repository wrote.
-func probe(t *testing.T, ctx context.Context) *pgx.Conn {
+func probe(ctx context.Context, t *testing.T) *pgx.Conn {
 	t.Helper()
 
 	conn, err := pgx.Connect(ctx, dsn(t))
@@ -72,12 +72,18 @@ func probe(t *testing.T, ctx context.Context) *pgx.Conn {
 	return conn
 }
 
-// reset empties everything the tests write, keeping the nicknames the seed
-// migration provides. Without it a test would read rows left by an earlier run.
+// reset empties everything the tests write. Without it a test would read rows
+// left by an earlier run.
 const reset = `
 TRUNCATE posts, comment_drafts, comments, suggested_posts, reports, identity_map,
          audit_log, users
 RESTART IDENTITY CASCADE`
+
+// Masks come from config.toml now, so the tests pick their own labels.
+const (
+	fox = "Лис"
+	owl = "Сова"
+)
 
 func open(t *testing.T) (*storage.Storage, context.Context) {
 	t.Helper()
@@ -88,7 +94,7 @@ func open(t *testing.T) (*storage.Storage, context.Context) {
 
 	require.NoError(t, storage.Migrate(ctx, cfg, log))
 
-	_, err := probe(t, ctx).Exec(ctx, reset)
+	_, err := probe(ctx, t).Exec(ctx, reset)
 	require.NoError(t, err)
 
 	st, err := storage.Open(ctx, cfg, log)
@@ -116,28 +122,17 @@ func TestUserLifecycle(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, userID, user.ID)
 	assert.False(t, user.Banned)
-	assert.Zero(t, user.LastNicknameID, "a fresh user has no remembered mask")
+	assert.Empty(t, user.LastNickname, "a fresh user has no remembered mask")
 
 	again, err := st.EnsureUser(ctx, userID)
 	require.NoError(t, err)
 	assert.Equal(t, user, again, "EnsureUser is an upsert, not an insert")
 
-	nicknames, err := st.ActiveNicknames(ctx)
-	require.NoError(t, err)
-	require.NotEmpty(t, nicknames, "the seed migration must provide masks")
-
-	require.NoError(t, st.SetLastNickname(ctx, userID, nicknames[0].ID))
+	require.NoError(t, st.SetLastNickname(ctx, userID, fox))
 
 	updated, err := st.EnsureUser(ctx, userID)
 	require.NoError(t, err)
-	assert.Equal(t, nicknames[0].ID, updated.LastNicknameID)
-}
-
-func TestNicknameNotFound(t *testing.T) {
-	st, ctx := open(t)
-
-	_, err := st.Nickname(ctx, 999_999)
-	require.ErrorIs(t, err, comment.ErrNotFound, "the core relies on this sentinel")
+	assert.Equal(t, fox, updated.LastNickname)
 }
 
 func TestPostLinking(t *testing.T) {
@@ -181,30 +176,26 @@ func TestDraftLifecycle(t *testing.T) {
 	_, err := st.EnsureUser(ctx, userID)
 	require.NoError(t, err)
 
-	nicknames, err := st.ActiveNicknames(ctx)
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(nicknames), 2)
-
 	_, err = st.Draft(ctx, userID)
 	require.ErrorIs(t, err, comment.ErrNotFound)
 
 	created := time.Now().UTC().Truncate(time.Millisecond)
-	draft := comment.Draft{UserID: userID, PostID: 4242, NicknameID: nicknames[0].ID, CreatedAt: created}
+	draft := comment.Draft{UserID: userID, PostID: 4242, Nickname: fox, CreatedAt: created}
 	require.NoError(t, st.SaveDraft(ctx, draft))
 
 	got, err := st.Draft(ctx, userID)
 	require.NoError(t, err)
 	assert.Equal(t, draft.PostID, got.PostID)
-	assert.Equal(t, draft.NicknameID, got.NicknameID)
+	assert.Equal(t, draft.Nickname, got.Nickname)
 	assert.WithinDuration(t, created, got.CreatedAt, time.Millisecond)
 
 	// Switching the mask must overwrite, not duplicate: user_id is the primary key.
-	draft.NicknameID = nicknames[1].ID
+	draft.Nickname = owl
 	require.NoError(t, st.SaveDraft(ctx, draft))
 
 	got, err = st.Draft(ctx, userID)
 	require.NoError(t, err)
-	assert.Equal(t, nicknames[1].ID, got.NicknameID)
+	assert.Equal(t, owl, got.Nickname)
 
 	require.NoError(t, st.DeleteDraft(ctx, userID))
 	_, err = st.Draft(ctx, userID)
@@ -224,17 +215,14 @@ func TestCommentPublishWritesIdentityMap(t *testing.T) {
 	_, err := st.EnsureUser(ctx, userID)
 	require.NoError(t, err)
 
-	nicknames, err := st.ActiveNicknames(ctx)
-	require.NoError(t, err)
-
 	id, err := st.CreateComment(ctx, comment.Comment{
-		UserID:     userID,
-		PostID:     4242,
-		NicknameID: nicknames[0].ID,
-		Text:       "привет",
-		Media:      []comment.Media{{Type: comment.MediaPhoto, FileID: "f1", FileUniqueID: "u1"}},
-		Status:     comment.StatusPending,
-		CreatedAt:  time.Now().UTC(),
+		UserID:    userID,
+		PostID:    4242,
+		Nickname:  fox,
+		Text:      "привет",
+		Media:     []comment.Media{{Type: comment.MediaPhoto, FileID: "f1", FileUniqueID: "u1"}},
+		Status:    comment.StatusPending,
+		CreatedAt: time.Now().UTC(),
 	})
 	require.NoError(t, err)
 	require.NotZero(t, id)
@@ -243,21 +231,21 @@ func TestCommentPublishWritesIdentityMap(t *testing.T) {
 
 	var (
 		author     int64
-		nickname   int64
+		nickname   string
 		commentID  int64
 		status     string
 		storedText string
 	)
 
-	err = probe(t, ctx).QueryRow(ctx, `
-SELECT i.user_id, i.nickname_id, i.comment_id, c.status, c.content_text
+	err = probe(ctx, t).QueryRow(ctx, `
+SELECT i.user_id, i.nickname, i.comment_id, c.status, c.content_text
 FROM identity_map i JOIN comments c ON c.id = i.comment_id
 WHERE i.message_id_in_group = $1`, messageID).
 		Scan(&author, &nickname, &commentID, &status, &storedText)
 	require.NoError(t, err)
 
 	assert.Equal(t, userID, author, "identity_map is what lets a moderator trace an author")
-	assert.Equal(t, nicknames[0].ID, nickname)
+	assert.Equal(t, fox, nickname, "the label is stored verbatim, not a foreign key")
 	assert.Equal(t, id, commentID)
 	assert.Equal(t, string(comment.StatusPublished), status)
 	assert.Equal(t, "привет", storedText)
@@ -274,29 +262,26 @@ func TestCommentWithoutMedia(t *testing.T) {
 	_, err := st.EnsureUser(ctx, userID)
 	require.NoError(t, err)
 
-	nicknames, err := st.ActiveNicknames(ctx)
-	require.NoError(t, err)
-
 	// A nil slice must land as an empty JSON array, not NULL.
 	id, err := st.CreateComment(ctx, comment.Comment{
-		UserID:     userID,
-		PostID:     4242,
-		NicknameID: nicknames[0].ID,
-		Text:       "без медиа",
-		Status:     comment.StatusPending,
-		CreatedAt:  time.Now().UTC(),
+		UserID:    userID,
+		PostID:    4242,
+		Nickname:  fox,
+		Text:      "без медиа",
+		Status:    comment.StatusPending,
+		CreatedAt: time.Now().UTC(),
 	})
 	require.NoError(t, err)
 
 	var media string
-	require.NoError(t, probe(t, ctx).
+	require.NoError(t, probe(ctx, t).
 		QueryRow(ctx, `SELECT media_json::text FROM comments WHERE id = $1`, id).Scan(&media))
 	assert.Equal(t, "[]", media)
 
 	require.NoError(t, st.MarkCommentFailed(ctx, id))
 
 	var status string
-	require.NoError(t, probe(t, ctx).
+	require.NoError(t, probe(ctx, t).
 		QueryRow(ctx, `SELECT status FROM comments WHERE id = $1`, id).Scan(&status))
 	assert.Equal(t, string(comment.StatusFailed), status)
 }
@@ -315,7 +300,7 @@ func TestSaveReport(t *testing.T) {
 	require.NoError(t, st.SaveReport(ctx, "comment", 1, 10_006, "спам"))
 
 	var n int
-	require.NoError(t, probe(t, ctx).
+	require.NoError(t, probe(ctx, t).
 		QueryRow(ctx, `SELECT count(*) FROM reports WHERE target_type = 'comment' AND target_id = 1`).Scan(&n))
 	assert.Equal(t, 2, n, "every complaint is kept, duplicates included")
 }

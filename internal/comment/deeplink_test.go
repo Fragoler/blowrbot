@@ -58,13 +58,26 @@ func TestParseStartPayload(t *testing.T) {
 func TestCallbackRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	nick, err := comment.ParseNicknameCallback(comment.NicknameCallback(17))
-	require.NoError(t, err)
-	assert.Equal(t, int64(17), nick)
+	// The label travels verbatim, so a config edit cannot shift what a button means.
+	for _, label := range []string{"Лис", "Сова", "Ёж", "a b c", "nick:weird"} {
+		got, err := comment.ParseNicknameCallback(comment.NicknameCallback(label))
+		require.NoError(t, err, label)
+		assert.Equal(t, label, got)
+	}
 
 	report, err := comment.ParseReportCallback(comment.ReportCallback(99))
 	require.NoError(t, err)
 	assert.Equal(t, int64(99), report)
+}
+
+func TestNicknameCallbackFits(t *testing.T) {
+	t.Parallel()
+
+	// "nick:" is 5 bytes of the 64 Telegram allows for callback_data.
+	assert.True(t, comment.NicknameCallbackFits("Тушканчик"))
+	assert.True(t, comment.NicknameCallbackFits(strings.Repeat("я", 29)+"a"), "59 bytes is the longest that fits")
+	assert.False(t, comment.NicknameCallbackFits(strings.Repeat("я", 30)), "60 bytes overflows")
+	assert.LessOrEqual(t, len(comment.NicknameCallback(strings.Repeat("я", 29)+"a")), comment.MaxCallbackLen)
 }
 
 func TestCallbackParseRejectsForeignData(t *testing.T) {
@@ -74,16 +87,16 @@ func TestCallbackParseRejectsForeignData(t *testing.T) {
 	_, err := comment.ParseNicknameCallback(comment.ReportCallback(5))
 	require.ErrorIs(t, err, comment.ErrBadPayload)
 
-	_, err = comment.ParseReportCallback(comment.NicknameCallback(5))
+	_, err = comment.ParseReportCallback(comment.NicknameCallback("Лис"))
 	require.ErrorIs(t, err, comment.ErrBadPayload)
 
-	for _, data := range []string{"", "nick:", "nick:abc", "nick:0", "nick:-3", "report:x"} {
+	for _, data := range []string{"", "nick:", "nick:   ", "Лис"} {
 		_, err := comment.ParseNicknameCallback(data)
-		if strings.HasPrefix(data, "nick:") {
-			require.ErrorIs(t, err, comment.ErrBadPayload, data)
-		}
+		require.ErrorIs(t, err, comment.ErrBadPayload, data)
+	}
 
-		_, err = comment.ParseReportCallback(data)
+	for _, data := range []string{"", "report:", "report:x", "report:0", "report:-3"} {
+		_, err := comment.ParseReportCallback(data)
 		require.Error(t, err, data)
 	}
 }

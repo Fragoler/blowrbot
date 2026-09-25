@@ -4,15 +4,11 @@ dotenv: ['.env']
 
 vars:
   GO_VERSION: '1.26.5'
-  GCI_VERSION: 'v0.14.0'
   GOLINT_VERSION: 'v2.13.1'
-  GOFUMPT_VERSION: 'v0.11.0'
   GOOSE_VERSION: 'v3.28.0'
 
   BIN_DIR: "{{.ROOT_DIR}}/bin"
   GOLANGCI_LINT: "{{.BIN_DIR}}/golangci-lint"
-  GCI: "{{.BIN_DIR}}/gci"
-  GOFUMPT: "{{.BIN_DIR}}/gofumpt"
   GOOSE: "{{.BIN_DIR}}/goose"
   
 
@@ -39,14 +35,6 @@ tasks:
     status:
       - '[[ $(go version) == *"go{{.GO_VERSION}}"* ]]'
 
-  install:gci:
-    desc: Install gci {{.GCI}}
-    cmds:
-      - mkdir -p {{.BIN_DIR}}
-      - GOBIN={{.BIN_DIR}} go install github.com/daixiang0/gci@{{.GCI_VERSION}}
-    status:
-      - "{{.GCI}} --version 2>/dev/null | grep -q '{{trimPrefix \"v\" .GCI_VERSION}}'"
-
   install:golint:
     desc: Install golangci-lint {{.GOLINT}}
     cmds:
@@ -54,14 +42,6 @@ tasks:
       - GOBIN={{.BIN_DIR}} go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{.GOLINT_VERSION}}
     status:
       - "{{.GOLANGCI_LINT}} version 2>/dev/null | grep -q '{{trimPrefix \"v\" .GOLINT_VERSION}}'"
-
-  install:gofmt:
-    desc: Install gofumpt {{.GOFMT}}
-    cmds:
-      - mkdir -p {{.BIN_DIR}}
-      - GOBIN={{.BIN_DIR}} go install mvdan.cc/gofumpt@{{.GOFUMPT_VERSION}}
-    status:
-      - "{{.GOFUMPT}} --version 2>/dev/null | grep -q '{{trimPrefix \"v\" .GOFUMPT_VERSION}}'"
 
   install:goose:
     desc: Install goose {{.GOOSE_VERSION}}
@@ -75,13 +55,10 @@ tasks:
     desc: Install all linters & formatters
     deps:
       - install:go
-      - install:gci
       - install:golint
-      - install:gofmt
       - install:goose
 
   # ── Lint ───────────────────────────────────────────────────
-
   lint:
     desc: Run golangci-lint
     deps: [install:golint]
@@ -96,27 +73,18 @@ tasks:
       - "{{.GOLANGCI_LINT}} run --build-tags=integration --fix ./..."
 
   # ── Format ────────────────────────────────────────────────
-
   fmt:
     desc: Format code
-    deps: [install:gofmt, install:gci]
+    deps: [install:golint]
     cmds:
-      - "{{.GOFUMPT}} -w ."
-      - "{{.GCI}} write --skip-generated -s standard -s default -s localmodule ."
+      - "{{.GOLANGCI_LINT}} fmt"
 
   fmt:check:
     desc: Check formatting without modifying files
-    deps: [install:gofmt, install:gci]
+    deps: [install:golint]
     cmds:
-      # gofumpt -d exits non-zero on a diff, gci diff does not: gate it by output.
-      - "{{.GOFUMPT}} -d ."
-      - |
-        drift=$({{.GCI}} diff --skip-generated -s standard -s default -s localmodule .)
-        if [ -n "$drift" ]; then
-          echo "$drift"
-          echo "imports are not sorted; run: task fmt"
-          exit 1
-        fi
+      # Exits non-zero on drift, and covers build-tagged files without extra flags.
+      - "{{.GOLANGCI_LINT}} fmt --diff"
 
   # ── Migrations ────────────────────────────────────────────
   migrate:up:
@@ -150,7 +118,6 @@ tasks:
       - "{{.GOOSE}} -s create {{.CLI_ARGS}} sql"
 
   # ── Test ──────────────────────────────────────────────────
-
   test:
     desc: Run unit tests
     cmds:
@@ -173,12 +140,11 @@ tasks:
       - GOBIN={{.BIN_DIR}} go build -o {{.BIN_DIR}}/loudbot ./cmd/loudbot/main.go
 
   # ── Docker ────────────────────────────────────────────────
-
   docker:build:
     desc: Build the deploy image locally
     cmds:
       - docker build -f deploy/Dockerfile -t loudbot:local --build-arg VERSION=local .
-
+  
   # ── RUN ───────────────────────────────────────────────────
   run:
     desc: Run project

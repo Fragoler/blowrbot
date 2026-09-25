@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/pelletier/go-toml/v2"
+
+	"loudbot/internal/comment"
 )
 
 const (
@@ -22,6 +24,7 @@ const (
 	// EnvBotToken holds the Telegram bot token.
 	EnvBotToken = "BOT_TOKEN"
 	// EnvPostgresPassword holds the Postgres password.
+	//nolint:gosec // G101: this is the name of an environment variable, not a credential.
 	EnvPostgresPassword = "POSTGRES_PASSWORD"
 
 	defaultPath = "config.toml"
@@ -41,6 +44,16 @@ type Config struct {
 	Postgres   Postgres   `toml:"postgres"`
 	Moderation Moderation `toml:"moderation"`
 	Comments   Comments   `toml:"comments"`
+	// Nicknames is the curated mask list. It lives here rather than in the
+	// database so that editing it is a config change and a restart, no migration.
+	Nicknames []Nickname `toml:"nicknames"`
+}
+
+// Nickname is one entry of the mask list. Label is the identity: it is stored on
+// every published comment, so renaming one here does not rewrite old messages.
+type Nickname struct {
+	Label string `toml:"label"`
+	Emoji string `toml:"emoji"`
 }
 
 type Service struct {
@@ -111,7 +124,9 @@ func Load(path string) (Config, error) {
 		path = defaultPath
 	}
 
-	raw, err := os.ReadFile(path)
+	// G703: the path comes from the operator's own -config flag or CONFIG_PATH,
+	// never from a user of the bot, so there is no untrusted input to traverse with.
+	raw, err := os.ReadFile(path) //nolint:gosec
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
@@ -211,11 +226,54 @@ func (c Config) Validate() error {
 		errs = append(errs, err)
 	}
 
+	errs = append(errs, c.validateNicknames()...)
+
 	if _, err := parseLevel(c.Service.LogLevel); err != nil {
 		errs = append(errs, err)
 	}
 
 	return errors.Join(errs...)
+}
+
+// validateNicknames rejects a list the bot could not actually offer: an empty one,
+// blank or duplicated labels, or a label too long to survive Telegram's 64-byte
+// callback_data limit once it is put on a button.
+func (c Config) validateNicknames() []error {
+	if len(c.Nicknames) == 0 {
+		return []error{errors.New("at least one [[nicknames]] entry is required")}
+	}
+
+	var (
+		errs []error
+		seen = make(map[string]struct{}, len(c.Nicknames))
+	)
+
+	for i, n := range c.Nicknames {
+		label := strings.TrimSpace(n.Label)
+
+		switch {
+		case label == "":
+			errs = append(errs, fmt.Errorf("nicknames[%d].label is empty", i))
+
+			continue
+		case label != n.Label:
+			errs = append(errs, fmt.Errorf("nicknames[%d].label=%q has leading or trailing spaces", i, n.Label))
+		}
+
+		if _, dup := seen[label]; dup {
+			errs = append(errs, fmt.Errorf("nicknames[%d].label=%q is a duplicate", i, label))
+		}
+		seen[label] = struct{}{}
+
+		if !comment.NicknameCallbackFits(label) {
+			errs = append(errs, fmt.Errorf(
+				"nicknames[%d].label=%q is too long: %d bytes, and a button carries it within %d",
+				i, label, len(label), comment.MaxCallbackLen,
+			))
+		}
+	}
+
+	return errs
 }
 
 // LogLevel maps service.log_level onto slog; an unparsable value falls back to info

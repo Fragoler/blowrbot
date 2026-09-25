@@ -15,6 +15,9 @@ const (
 
 	// maxPayloadLen is the Telegram limit for a /start payload.
 	maxPayloadLen = 64
+	// MaxCallbackLen is the Telegram limit for callback_data. A nickname label
+	// travels inside it, so config validation checks every label against it.
+	MaxCallbackLen = 64
 )
 
 // DeepLink builds the URL behind the "comment anonymously" button under a post.
@@ -46,14 +49,26 @@ func ParseStartPayload(payload string) (int, error) {
 	return id, nil
 }
 
-// NicknameCallback builds the callback data of a nickname button.
-func NicknameCallback(nicknameID int64) string {
-	return nicknamePrefix + strconv.FormatInt(nicknameID, 10)
+// NicknameCallback builds the callback data of a nickname button. The label
+// itself travels in it rather than a position in the list, so editing the config
+// can never make an open keyboard select the wrong mask.
+func NicknameCallback(label string) string {
+	return nicknamePrefix + label
 }
 
-// ParseNicknameCallback reads a nickname id back from callback data.
-func ParseNicknameCallback(data string) (int64, error) {
-	return parseIDCallback(data, nicknamePrefix)
+// NicknameCallbackFits reports whether a label survives the callback_data limit.
+func NicknameCallbackFits(label string) bool {
+	return len(NicknameCallback(label)) <= MaxCallbackLen
+}
+
+// ParseNicknameCallback reads a nickname label back from callback data.
+func ParseNicknameCallback(data string) (string, error) {
+	raw, ok := strings.CutPrefix(data, nicknamePrefix)
+	if !ok || strings.TrimSpace(raw) == "" {
+		return "", fmt.Errorf("%w: %q", ErrBadPayload, data)
+	}
+
+	return raw, nil
 }
 
 // ReportCallback builds the callback data of the "report" button under a comment.
