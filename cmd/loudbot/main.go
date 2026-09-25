@@ -56,7 +56,7 @@ func run(configPath string) error {
 	}
 	defer store.Close()
 
-	bot, err := telegram.New(cfg, store, log)
+	bot, err := telegram.New(cfg, log)
 	if err != nil {
 		return fmt.Errorf("telegram: %w", err)
 	}
@@ -68,11 +68,11 @@ func run(configPath string) error {
 
 	// Antiabuse is not wired yet, so the core runs with a permissive guard.
 	comments := comment.New(store, bot.Publisher(), comment.AllowAll{}, comment.Options{
-		BotUsername:       cfg.Telegram.BotUsername,
-		Nicknames:         nicknames(cfg),
-		MaxTextLen:        cfg.Comments.MaxTextLen,
-		NicknameSeparator: cfg.Comments.NicknameSeparator,
-		DraftTTL:          ttl,
+		BotUsername: cfg.Telegram.BotUsername,
+		ChannelID:   cfg.Telegram.ChannelID,
+		Nicknames:   nicknames(cfg),
+		MaxTextLen:  cfg.Comments.MaxTextLen,
+		DraftTTL:    ttl,
 	})
 	bot.UseComments(comments)
 

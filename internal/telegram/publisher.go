@@ -63,13 +63,7 @@ func (p *Publisher) PublishComment(ctx context.Context, req comment.PublishReque
 		MessageID: req.ReplyToMessageID,
 	}
 
-	markup := models.InlineKeyboardMarkup{
-		InlineKeyboard: [][]models.InlineKeyboardButton{{
-			{Text: btnReport, CallbackData: comment.ReportCallback(req.CommentID)},
-		}},
-	}
-
-	msg, err := p.send(ctx, req, reply, markup)
+	msg, err := p.send(ctx, req, reply)
 	if err != nil {
 		return comment.PublishResult{}, err
 	}
@@ -77,18 +71,19 @@ func (p *Publisher) PublishComment(ctx context.Context, req comment.PublishReque
 	return comment.PublishResult{MessageID: msg.ID}, nil
 }
 
+// send renders the comment. Text is already HTML — the mask in bold, a blank
+// line, then the author's escaped words — so every branch sets the parse mode.
 func (p *Publisher) send(
 	ctx context.Context,
 	req comment.PublishRequest,
 	reply *models.ReplyParameters,
-	markup models.InlineKeyboardMarkup,
 ) (*models.Message, error) {
 	if len(req.Media) == 0 {
 		return p.api.SendMessage(ctx, &tgbot.SendMessageParams{
 			ChatID:          req.ChatID,
 			Text:            req.Text,
+			ParseMode:       models.ParseModeHTML,
 			ReplyParameters: reply,
-			ReplyMarkup:     markup,
 		})
 	}
 
@@ -101,8 +96,8 @@ func (p *Publisher) send(
 			ChatID:          req.ChatID,
 			Photo:           file,
 			Caption:         req.Text,
+			ParseMode:       models.ParseModeHTML,
 			ReplyParameters: reply,
-			ReplyMarkup:     markup,
 		})
 
 	case comment.MediaVideo:
@@ -110,8 +105,8 @@ func (p *Publisher) send(
 			ChatID:          req.ChatID,
 			Video:           file,
 			Caption:         req.Text,
+			ParseMode:       models.ParseModeHTML,
 			ReplyParameters: reply,
-			ReplyMarkup:     markup,
 		})
 
 	case comment.MediaDocument:
@@ -119,8 +114,8 @@ func (p *Publisher) send(
 			ChatID:          req.ChatID,
 			Document:        file,
 			Caption:         req.Text,
+			ParseMode:       models.ParseModeHTML,
 			ReplyParameters: reply,
-			ReplyMarkup:     markup,
 		})
 
 	default:

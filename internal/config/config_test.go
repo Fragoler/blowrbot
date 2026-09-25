@@ -62,7 +62,6 @@ func TestLoad(t *testing.T) {
 	assert.Equal(t, "p@ss word", cfg.Postgres.Password)
 	assert.Equal(t, "disable", cfg.Postgres.SSLMode, "defaults fill what the file omits")
 	assert.Equal(t, 3500, cfg.Comments.MaxTextLen)
-	assert.Equal(t, ": ", cfg.Comments.NicknameSeparator)
 	assert.Equal(t, []config.Nickname{{Label: "Лис"}, {Label: "Сова"}}, cfg.Nicknames)
 	assert.Equal(t, "postgres://loudbot:p%40ss%20word@db:5432/loudbot?sslmode=disable", cfg.Postgres.DSN())
 }

@@ -10,30 +10,33 @@ import (
 // for a Russian-speaking channel.
 const (
 	btnComment = "💬 Комментировать анонимно"
-	btnReport  = "🚩 Пожаловаться"
+	btnOpen    = "Открыть пост"
+	btnCancel  = "Отмена"
+
+	// msgInvite is the bot's first comment under every post; config.Comments.InviteText overrides it.
+	msgInvite = "Комментарии к этому посту анонимные. Нажмите кнопку ниже — и пишите."
 
 	msgHelp = "Этот бот публикует анонимные комментарии.\n\n" +
 		"Нажмите «" + btnComment + "» под постом в канале — и напишите сюда текст или пришлите медиа."
 
-	// msgInvite is the bot's first comment under every post; config.Comments.InviteText overrides it.
-	msgInvite = "Комментарии к этому посту анонимные. Нажмите кнопку ниже, выберите маску — и пишите."
+	// msgPrompt greets an author who just arrived from a post; the quote of the
+	// post itself is appended to it.
+	msgPrompt = "Напишите комментарий к посту — текстом или медиа."
 
-	msgChooseNickname = "Выберите маску и отправьте комментарий — текстом или медиа."
-	msgNicknameSet    = "Маска: %s"
-	msgPublished      = "Комментарий опубликован под маской %s."
-
-	msgReportAccepted = "Жалоба отправлена модераторам."
-	msgReportFailed   = "Не удалось отправить жалобу, попробуйте позже."
+	msgChooseNickname = "Под каким псевдонимом отправить?"
+	msgPublished      = "Комментарий отправлен."
+	msgCancelled      = "Черновик удалён. Напишите новый комментарий."
 
 	msgErrBanned       = "Вы не можете оставлять комментарии."
 	msgErrBadPayload   = "Ссылка не распознана. Откройте её кнопкой под постом."
 	msgErrUnknownPost  = "Пост не найден — возможно, он удалён."
-	msgErrNoNicknames  = "Список масок пуст, комментарии временно недоступны."
+	msgErrNoNicknames  = "Список псевдонимов пуст, комментарии временно недоступны."
 	msgErrNoDraft      = "Сначала нажмите «" + btnComment + "» под нужным постом."
 	msgErrDraftExpired = "Время на комментарий истекло. Нажмите кнопку под постом ещё раз."
-	msgErrNickname     = "Эта маска больше недоступна, выберите другую."
+	msgErrNickname     = "Этот псевдоним больше недоступен, выберите другой."
 	msgErrEmpty        = "Пустой комментарий: пришлите текст или медиа."
 	msgErrTooLong      = "Комментарий слишком длинный, сократите текст."
+	msgErrNothing      = "Нечего отправлять — сначала напишите комментарий."
 	msgErrUnsupported  = "Такой тип вложения не поддерживается."
 	msgErrInternal     = "Что-то пошло не так, попробуйте ещё раз позже."
 )
@@ -64,6 +67,8 @@ func userMessage(err error) string {
 		return msgErrEmpty
 	case errors.Is(err, comment.ErrTextTooLong):
 		return msgErrTooLong
+	case errors.Is(err, comment.ErrNothingStaged):
+		return msgErrNothing
 	default:
 		return msgErrInternal
 	}
@@ -86,6 +91,7 @@ func expected(err error) bool {
 		comment.ErrNicknameUnavailable,
 		comment.ErrEmptyComment,
 		comment.ErrTextTooLong,
+		comment.ErrNothingStaged,
 	} {
 		if errors.Is(err, sentinel) {
 			return true

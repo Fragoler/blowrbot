@@ -91,8 +91,6 @@ type Moderation struct {
 type Comments struct {
 	// MaxTextLen caps the comment body before the nickname prefix is added.
 	MaxTextLen int `toml:"max_text_len"`
-	// NicknameSeparator sits between the nickname and the comment body.
-	NicknameSeparator string `toml:"nickname_separator"`
 	// DraftTTL bounds how long a deep-link tap stays valid, e.g. "1h" or "30m".
 	DraftTTL string `toml:"draft_ttl"`
 	// InviteText is the bot's first comment under every post; empty means the default.
@@ -160,9 +158,8 @@ func defaults() Config {
 			MaxConns: 10,
 		},
 		Comments: Comments{
-			MaxTextLen:        3500,
-			NicknameSeparator: ": ",
-			DraftTTL:          "1h",
+			MaxTextLen: 3500,
+			DraftTTL:   "1h",
 		},
 	}
 }

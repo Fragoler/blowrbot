@@ -17,6 +17,7 @@ const (
 	postID       = 42
 	discussionID = int64(-100500)
 	threadMsgID  = 9001
+	channelID    = int64(-1001234567890)
 )
 
 var (
@@ -28,11 +29,11 @@ var (
 
 func testOptions() comment.Options {
 	return comment.Options{
-		BotUsername:       "anon_bot",
-		Nicknames:         []comment.Nickname{fox, owl},
-		MaxTextLen:        10,
-		NicknameSeparator: ": ",
-		DraftTTL:          time.Hour,
+		BotUsername: "anon_bot",
+		ChannelID:   channelID,
+		Nicknames:   []comment.Nickname{fox, owl},
+		MaxTextLen:  10,
+		DraftTTL:    time.Hour,
 	}
 }
 
@@ -45,19 +46,37 @@ func newService(t *testing.T, repo *fakeRepo, pub *fakePublisher, guard comment.
 	return svc
 }
 
-// fullRepo is the happy-path world: an active user and a post with a thread.
-// The masks come from Options, not from the repository.
-func fullRepo() *fakeRepo {
-	return newRepo().
-		withUser(comment.User{ID: userID}).
-		withPost(comment.Post{
-			ChannelMessageID:    postID,
-			DiscussionChatID:    discussionID,
-			DiscussionMessageID: threadMsgID,
-		})
+func testPost() comment.Post {
+	return comment.Post{
+		ChannelMessageID:    postID,
+		DiscussionChatID:    discussionID,
+		DiscussionMessageID: threadMsgID,
+		Body:                "Текст поста",
+		ChannelUsername:     "anon_channel",
+	}
 }
 
-func TestStartOpensDraft(t *testing.T) {
+// fullRepo is the happy-path world: an active user and a post with a thread.
+func fullRepo() *fakeRepo {
+	return newRepo().withUser(comment.User{ID: userID}).withPost(testPost())
+}
+
+// openDraft is a draft bound to the post with nothing written yet.
+func openDraft() comment.Draft {
+	return comment.Draft{UserID: userID, PostID: postID, CreatedAt: now}
+}
+
+// stagedDraft is a draft whose message is waiting for a mask.
+func stagedDraft() comment.Draft {
+	d := openDraft()
+	d.Body = "привет"
+	d.UserMessageID = 500
+	d.PromptMessageID = 501
+
+	return d
+}
+
+func TestStartBindsAuthorToPost(t *testing.T) {
 	t.Parallel()
 
 	repo := fullRepo()
@@ -66,39 +85,10 @@ func TestStartOpensDraft(t *testing.T) {
 	got, err := svc.Start(context.Background(), userID, "comment_42")
 	require.NoError(t, err)
 
-	assert.Equal(t, postID, got.PostID)
-	assert.Equal(t, []comment.Nickname{fox, owl}, got.Nicknames)
-	assert.Equal(t, fox, got.Selected, "first active mask is preselected for a new user")
+	assert.Equal(t, "Текст поста", got.Post.Body, "the transport quotes the post back to the author")
+	assert.Equal(t, "https://t.me/anon_channel/42", got.Link)
 
-	assert.Equal(t, comment.Draft{
-		UserID:    userID,
-		PostID:    postID,
-		Nickname:  fox.Label,
-		CreatedAt: now,
-	}, repo.drafts[userID])
-}
-
-func TestStartPreselectsLastNickname(t *testing.T) {
-	t.Parallel()
-
-	repo := fullRepo().withUser(comment.User{ID: userID, LastNickname: owl.Label})
-	svc := newService(t, repo, &fakePublisher{}, nil)
-
-	got, err := svc.Start(context.Background(), userID, "comment_42")
-	require.NoError(t, err)
-	assert.Equal(t, owl, got.Selected)
-}
-
-func TestStartFallsBackWhenLastNicknameIsGone(t *testing.T) {
-	t.Parallel()
-
-	// The mask the user last wore was dropped from the config.
-	repo := fullRepo().withUser(comment.User{ID: userID, LastNickname: "Мамонт"})
-	svc := newService(t, repo, &fakePublisher{}, nil)
-
-	got, err := svc.Start(context.Background(), userID, "comment_42")
-	require.NoError(t, err)
-	assert.Equal(t, fox, got.Selected)
+	assert.Equal(t, openDraft(), repo.drafts[userID], "no mask is chosen yet, and nothing is staged")
 }
 
 func TestStartErrors(t *testing.T) {
@@ -107,27 +97,18 @@ func TestStartErrors(t *testing.T) {
 	cases := []struct {
 		name    string
 		repo    func() *fakeRepo
+		opts    func(*comment.Options)
 		payload string
 		wantErr error
 	}{
-		{
-			name:    "malformed payload",
-			repo:    fullRepo,
-			payload: "hello",
-			wantErr: comment.ErrBadPayload,
-		},
+		{name: "malformed payload", repo: fullRepo, payload: "hello", wantErr: comment.ErrBadPayload},
 		{
 			name:    "banned user",
 			repo:    func() *fakeRepo { return fullRepo().withUser(comment.User{ID: userID, Banned: true}) },
 			payload: "comment_42",
 			wantErr: comment.ErrBanned,
 		},
-		{
-			name:    "unknown post",
-			repo:    fullRepo,
-			payload: "comment_43",
-			wantErr: comment.ErrUnknownPost,
-		},
+		{name: "unknown post", repo: fullRepo, payload: "comment_43", wantErr: comment.ErrUnknownPost},
 		{
 			name: "post without discussion thread",
 			repo: func() *fakeRepo {
@@ -135,6 +116,13 @@ func TestStartErrors(t *testing.T) {
 			},
 			payload: "comment_42",
 			wantErr: comment.ErrUnknownPost,
+		},
+		{
+			name:    "no masks configured",
+			repo:    fullRepo,
+			opts:    func(o *comment.Options) { o.Nicknames = nil },
+			payload: "comment_42",
+			wantErr: comment.ErrNoNicknames,
 		},
 		{
 			name:    "repository failure",
@@ -149,7 +137,13 @@ func TestStartErrors(t *testing.T) {
 			t.Parallel()
 
 			repo := tc.repo()
-			svc := newService(t, repo, &fakePublisher{}, nil)
+			opts := testOptions()
+			if tc.opts != nil {
+				tc.opts(&opts)
+			}
+
+			svc := comment.New(repo, &fakePublisher{}, nil, opts)
+			svc.SetClock(func() time.Time { return now })
 
 			_, err := svc.Start(context.Background(), userID, tc.payload)
 			require.ErrorIs(t, err, tc.wantErr)
@@ -158,285 +152,131 @@ func TestStartErrors(t *testing.T) {
 	}
 }
 
-func TestChooseNickname(t *testing.T) {
+func TestStageStoresMessageAndOffersMasks(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
-	svc := newService(t, repo, &fakePublisher{}, nil)
-
-	got, err := svc.ChooseNickname(context.Background(), userID, owl.Label)
-	require.NoError(t, err)
-	assert.Equal(t, owl, got)
-	assert.Equal(t, owl.Label, repo.drafts[userID].Nickname)
-	assert.Equal(t, postID, repo.drafts[userID].PostID, "switching the mask keeps the draft's post")
-}
-
-func TestChooseNicknameErrors(t *testing.T) {
-	t.Parallel()
-
-	openDraft := comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now}
-
-	cases := []struct {
-		name     string
-		repo     func() *fakeRepo
-		nickname string
-		wantErr  error
-	}{
-		{
-			name:     "no draft",
-			repo:     fullRepo,
-			nickname: owl.Label,
-			wantErr:  comment.ErrNoDraft,
-		},
-		{
-			name: "expired draft",
-			repo: func() *fakeRepo {
-				d := openDraft
-				d.CreatedAt = now.Add(-2 * time.Hour)
-
-				return fullRepo().withDraft(d)
-			},
-			nickname: owl.Label,
-			wantErr:  comment.ErrDraftExpired,
-		},
-		{
-			name:     "mask not in the config list",
-			repo:     func() *fakeRepo { return fullRepo().withDraft(openDraft) },
-			nickname: "Мамонт",
-			wantErr:  comment.ErrNicknameUnavailable,
-		},
-		{
-			name:     "empty label",
-			repo:     func() *fakeRepo { return fullRepo().withDraft(openDraft) },
-			nickname: "",
-			wantErr:  comment.ErrNicknameUnavailable,
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			svc := newService(t, tc.repo(), &fakePublisher{}, nil)
-
-			_, err := svc.ChooseNickname(context.Background(), userID, tc.nickname)
-			require.ErrorIs(t, err, tc.wantErr)
-		})
-	}
-}
-
-func TestExpiredDraftIsDropped(t *testing.T) {
-	t.Parallel()
-
-	repo := fullRepo().withDraft(comment.Draft{
-		UserID:    userID,
-		PostID:    postID,
-		Nickname:  fox.Label,
-		CreatedAt: now.Add(-2 * time.Hour),
-	})
-	svc := newService(t, repo, &fakePublisher{}, nil)
-
-	_, err := svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: "hi"})
-	require.ErrorIs(t, err, comment.ErrDraftExpired)
-	assert.Empty(t, repo.drafts, "an expired draft is removed so the next tap starts clean")
-}
-
-func TestDraftAtExactTTLIsStillValid(t *testing.T) {
-	t.Parallel()
-
-	repo := fullRepo().withDraft(comment.Draft{
-		UserID:    userID,
-		PostID:    postID,
-		Nickname:  fox.Label,
-		CreatedAt: now.Add(-time.Hour),
-	})
-	svc := newService(t, repo, &fakePublisher{result: comment.PublishResult{MessageID: 1}}, nil)
-
-	_, err := svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: "hi"})
-	require.NoError(t, err)
-}
-
-func TestSubmitPublishesAndRecords(t *testing.T) {
-	t.Parallel()
-
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: owl.Label, CreatedAt: now})
-	pub := &fakePublisher{result: comment.PublishResult{MessageID: 555}}
+	repo := fullRepo().withDraft(openDraft())
 	guard := &recordingGuard{}
-	svc := newService(t, repo, pub, guard)
+	svc := newService(t, repo, &fakePublisher{}, guard)
 
-	media := []comment.Media{{Type: comment.MediaPhoto, FileID: "f1", FileUniqueID: "u1"}}
+	media := []comment.Media{{Type: comment.MediaPhoto, FileID: "f1"}}
 
-	got, err := svc.Submit(context.Background(), comment.SubmitRequest{
-		UserID: userID,
-		Text:   "  привет  ",
-		Media:  media,
+	got, err := svc.Stage(context.Background(), comment.StageRequest{
+		UserID:    userID,
+		MessageID: 500,
+		Text:      "  привет  ",
+		Media:     media,
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, comment.StatusPublished, got.Status)
-	assert.Equal(t, 555, got.MessageID)
-	assert.Equal(t, "привет", got.Text, "the stored text is trimmed and carries no mask prefix")
-	assert.Equal(t, owl.Label, got.Nickname)
-	assert.Equal(t, postID, got.PostID)
-	assert.NotZero(t, got.ID)
+	assert.Equal(t, []comment.Nickname{fox, owl}, got.Nicknames)
+	assert.Zero(t, got.StaleMessageID, "nothing was staged before")
+	assert.Zero(t, got.StalePromptID)
 
-	require.Len(t, pub.requests, 1)
-	assert.Equal(t, comment.PublishRequest{
-		CommentID:        got.ID,
-		ChatID:           discussionID,
-		ReplyToMessageID: threadMsgID,
-		Text:             "Сова: привет",
-		Media:            media,
-	}, pub.requests[0], "the comment lands in the post's thread with the mask prefix")
+	stored := repo.drafts[userID]
+	assert.Equal(t, "привет", stored.Body, "the stored text is trimmed")
+	assert.Equal(t, media, stored.Media)
+	assert.Equal(t, 500, stored.UserMessageID)
+	assert.True(t, stored.Staged())
 
 	require.Len(t, guard.requests, 1)
-	assert.Equal(t, comment.GuardRequest{
-		UserID:   userID,
-		PostID:   postID,
-		Text:     "привет",
-		HasMedia: true,
-	}, guard.requests[0])
-
-	stored := repo.comments[got.ID]
-	assert.Equal(t, comment.StatusPublished, stored.Status)
-	assert.Equal(t, 555, stored.MessageID)
-
-	assert.Equal(t, owl.Label, repo.users[userID].LastNickname, "the mask is remembered for the next comment")
-	assert.Empty(t, repo.drafts, "a published comment closes the draft")
+	assert.Equal(t, comment.GuardRequest{UserID: userID, PostID: postID, Text: "привет", HasMedia: true}, guard.requests[0])
 }
 
-func TestSubmitMediaOnly(t *testing.T) {
+func TestStagePutsLastMaskFirst(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
-	pub := &fakePublisher{result: comment.PublishResult{MessageID: 1}}
-	svc := newService(t, repo, pub, nil)
+	repo := fullRepo().
+		withUser(comment.User{ID: userID, LastNickname: owl.Label}).
+		withDraft(openDraft())
+	svc := newService(t, repo, &fakePublisher{}, nil)
 
-	_, err := svc.Submit(context.Background(), comment.SubmitRequest{
-		UserID: userID,
-		Media:  []comment.Media{{Type: comment.MediaVideo, FileID: "v1"}},
-	})
+	got, err := svc.Stage(context.Background(), comment.StageRequest{UserID: userID, MessageID: 500, Text: "hi"})
+	require.NoError(t, err)
+	assert.Equal(t, []comment.Nickname{owl, fox}, got.Nicknames)
+}
+
+func TestStageKeepsConfigOrderWhenLastMaskIsGone(t *testing.T) {
+	t.Parallel()
+
+	repo := fullRepo().
+		withUser(comment.User{ID: userID, LastNickname: "Мамонт"}).
+		withDraft(openDraft())
+	svc := newService(t, repo, &fakePublisher{}, nil)
+
+	got, err := svc.Stage(context.Background(), comment.StageRequest{UserID: userID, MessageID: 500, Text: "hi"})
+	require.NoError(t, err)
+	assert.Equal(t, []comment.Nickname{fox, owl}, got.Nicknames)
+}
+
+func TestStageReplacesAnEarlierMessage(t *testing.T) {
+	t.Parallel()
+
+	repo := fullRepo().withDraft(stagedDraft())
+	svc := newService(t, repo, &fakePublisher{}, nil)
+
+	got, err := svc.Stage(context.Background(), comment.StageRequest{UserID: userID, MessageID: 600, Text: "ещё раз"})
 	require.NoError(t, err)
 
-	require.Len(t, pub.requests, 1)
-	assert.Equal(t, "Лис", pub.requests[0].Text, "a media-only comment is captioned with the mask alone")
+	assert.Equal(t, 500, got.StaleMessageID, "the transport takes the superseded pair off screen")
+	assert.Equal(t, 501, got.StalePromptID)
+
+	stored := repo.drafts[userID]
+	assert.Equal(t, "ещё раз", stored.Body, "writing again replaces the draft rather than queueing a second comment")
+	assert.Equal(t, 600, stored.UserMessageID)
+	assert.Zero(t, stored.PromptMessageID, "the new keyboard is attached separately once it is sent")
 }
 
-func TestSubmitCountsRunesNotBytes(t *testing.T) {
+func TestStageErrors(t *testing.T) {
 	t.Parallel()
-
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
-	pub := &fakePublisher{result: comment.PublishResult{MessageID: 1}}
-	svc := newService(t, repo, pub, nil)
-
-	// MaxTextLen is 10: ten Cyrillic runes are 20 bytes and must still pass.
-	_, err := svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: strings.Repeat("я", 10)})
-	require.NoError(t, err)
-
-	repo.withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
-
-	_, err = svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: strings.Repeat("я", 11)})
-	require.ErrorIs(t, err, comment.ErrTextTooLong)
-}
-
-func TestSubmitRejectedByGuard(t *testing.T) {
-	t.Parallel()
-
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
-	pub := &fakePublisher{}
-	guard := &blockingGuard{reason: "слишком часто"}
-	svc := newService(t, repo, pub, guard)
-
-	_, err := svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: "hi"})
-
-	rejected, ok := comment.Rejected(err)
-	require.True(t, ok, "the caller must be able to show the reason to the author")
-	assert.Equal(t, "слишком часто", rejected.Reason)
-
-	assert.Empty(t, pub.requests, "a rejected comment never reaches Telegram")
-	assert.Empty(t, repo.comments, "a rejected comment is not stored")
-	assert.NotEmpty(t, repo.drafts, "the draft survives so the author can retry")
-}
-
-func TestSubmitMarksCommentFailedWhenTelegramRefuses(t *testing.T) {
-	t.Parallel()
-
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
-	pub := &fakePublisher{err: errBoom}
-	svc := newService(t, repo, pub, nil)
-
-	_, err := svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: "hi"})
-	require.ErrorIs(t, err, errBoom)
-
-	require.Len(t, repo.comments, 1)
-	for _, c := range repo.comments {
-		assert.Equal(t, comment.StatusFailed, c.Status, "a pending row must not be left behind")
-	}
-
-	assert.NotEmpty(t, repo.drafts, "the draft survives a transport failure so the author can retry")
-}
-
-func TestSubmitErrors(t *testing.T) {
-	t.Parallel()
-
-	openDraft := comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now}
 
 	cases := []struct {
 		name    string
 		repo    func() *fakeRepo
-		req     comment.SubmitRequest
+		req     comment.StageRequest
 		wantErr error
 	}{
 		{
-			name: "banned user",
-			repo: func() *fakeRepo {
-				return fullRepo().withUser(comment.User{ID: userID, Banned: true}).withDraft(openDraft)
-			},
-			req:     comment.SubmitRequest{UserID: userID, Text: "hi"},
-			wantErr: comment.ErrBanned,
-		},
-		{
 			name:    "no draft",
 			repo:    fullRepo,
-			req:     comment.SubmitRequest{UserID: userID, Text: "hi"},
+			req:     comment.StageRequest{UserID: userID, MessageID: 1, Text: "hi"},
 			wantErr: comment.ErrNoDraft,
 		},
 		{
-			name:    "empty comment",
-			repo:    func() *fakeRepo { return fullRepo().withDraft(openDraft) },
-			req:     comment.SubmitRequest{UserID: userID, Text: "   "},
+			name: "expired draft",
+			repo: func() *fakeRepo {
+				d := openDraft()
+				d.CreatedAt = now.Add(-2 * time.Hour)
+				return fullRepo().withDraft(d)
+			},
+			req:     comment.StageRequest{UserID: userID, MessageID: 1, Text: "hi"},
+			wantErr: comment.ErrDraftExpired,
+		},
+		{
+			name: "banned user",
+			repo: func() *fakeRepo {
+				return fullRepo().withUser(comment.User{ID: userID, Banned: true}).withDraft(openDraft())
+			},
+			req:     comment.StageRequest{UserID: userID, MessageID: 1, Text: "hi"},
+			wantErr: comment.ErrBanned,
+		},
+		{
+			name:    "empty message",
+			repo:    func() *fakeRepo { return fullRepo().withDraft(openDraft()) },
+			req:     comment.StageRequest{UserID: userID, MessageID: 1, Text: "   "},
 			wantErr: comment.ErrEmptyComment,
 		},
 		{
 			name:    "text too long",
-			repo:    func() *fakeRepo { return fullRepo().withDraft(openDraft) },
-			req:     comment.SubmitRequest{UserID: userID, Text: strings.Repeat("a", 11)},
+			repo:    func() *fakeRepo { return fullRepo().withDraft(openDraft()) },
+			req:     comment.StageRequest{UserID: userID, MessageID: 1, Text: strings.Repeat("a", 11)},
 			wantErr: comment.ErrTextTooLong,
 		},
 		{
-			name: "post deleted while composing",
-			repo: func() *fakeRepo {
-				return newRepo().withUser(comment.User{ID: userID}).withDraft(openDraft)
-			},
-			req:     comment.SubmitRequest{UserID: userID, Text: "hi"},
+			name:    "post deleted while composing",
+			repo:    func() *fakeRepo { return newRepo().withUser(comment.User{ID: userID}).withDraft(openDraft()) },
+			req:     comment.StageRequest{UserID: userID, MessageID: 1, Text: "hi"},
 			wantErr: comment.ErrUnknownPost,
-		},
-		{
-			name: "mask dropped from the config while composing",
-			repo: func() *fakeRepo {
-				d := openDraft
-				d.Nickname = "Мамонт"
-
-				return fullRepo().withDraft(d)
-			},
-			req:     comment.SubmitRequest{UserID: userID, Text: "hi"},
-			wantErr: comment.ErrNicknameUnavailable,
-		},
-		{
-			name:    "create comment fails",
-			repo:    func() *fakeRepo { r := fullRepo().withDraft(openDraft); r.createErr = errBoom; return r },
-			req:     comment.SubmitRequest{UserID: userID, Text: "hi"},
-			wantErr: errBoom,
 		},
 	}
 
@@ -445,40 +285,230 @@ func TestSubmitErrors(t *testing.T) {
 			t.Parallel()
 
 			repo := tc.repo()
-			pub := &fakePublisher{result: comment.PublishResult{MessageID: 1}}
-			svc := newService(t, repo, pub, nil)
+			svc := newService(t, repo, &fakePublisher{}, nil)
 
-			_, err := svc.Submit(context.Background(), tc.req)
+			_, err := svc.Stage(context.Background(), tc.req)
 			require.ErrorIs(t, err, tc.wantErr)
-			assert.Empty(t, pub.requests, "nothing is published when validation fails")
+
+			if d, ok := repo.drafts[userID]; ok {
+				assert.False(t, d.Staged(), "a refused message must not be left staged")
+			}
 		})
 	}
 }
 
-func TestSubmitValidatesBeforeTouchingTelegram(t *testing.T) {
+func TestStageCountsRunesNotBytes(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
-	guard := &recordingGuard{}
-	pub := &fakePublisher{}
-	svc := newService(t, repo, pub, guard)
+	repo := fullRepo().withDraft(openDraft())
+	svc := newService(t, repo, &fakePublisher{}, nil)
+	ctx := context.Background()
 
-	_, err := svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: ""})
-	require.ErrorIs(t, err, comment.ErrEmptyComment)
-	assert.Empty(t, guard.requests, "antiabuse is not consulted for an empty message")
+	// MaxTextLen is 10: ten Cyrillic runes are 20 bytes and must still pass.
+	_, err := svc.Stage(ctx, comment.StageRequest{UserID: userID, MessageID: 1, Text: strings.Repeat("я", 10)})
+	require.NoError(t, err)
+
+	_, err = svc.Stage(ctx, comment.StageRequest{UserID: userID, MessageID: 2, Text: strings.Repeat("я", 11)})
+	require.ErrorIs(t, err, comment.ErrTextTooLong)
 }
 
-func TestServiceDeepLinkUsesConfiguredUsername(t *testing.T) {
+func TestStageRejectedByGuard(t *testing.T) {
+	t.Parallel()
+
+	repo := fullRepo().withDraft(openDraft())
+	guard := &blockingGuard{reason: "слишком часто"}
+	svc := newService(t, repo, &fakePublisher{}, guard)
+
+	_, err := svc.Stage(context.Background(), comment.StageRequest{UserID: userID, MessageID: 1, Text: "hi"})
+
+	rejected, ok := comment.Rejected(err)
+	require.True(t, ok, "the caller must be able to show the reason to the author")
+	assert.Equal(t, "слишком часто", rejected.Reason)
+	assert.False(t, repo.drafts[userID].Staged(), "a rejected message is never staged")
+}
+
+func TestAttachPrompt(t *testing.T) {
+	t.Parallel()
+
+	draft := stagedDraft()
+	draft.PromptMessageID = 0
+	repo := fullRepo().withDraft(draft)
+	svc := newService(t, repo, &fakePublisher{}, nil)
+
+	require.NoError(t, svc.AttachPrompt(context.Background(), userID, 900))
+	assert.Equal(t, 900, repo.drafts[userID].PromptMessageID)
+	assert.Equal(t, "привет", repo.drafts[userID].Body, "attaching the keyboard leaves the message alone")
+}
+
+func TestPublish(t *testing.T) {
+	t.Parallel()
+
+	draft := stagedDraft()
+	draft.Media = []comment.Media{{Type: comment.MediaPhoto, FileID: "f1"}}
+	repo := fullRepo().withDraft(draft)
+	pub := &fakePublisher{result: comment.PublishResult{MessageID: 555}}
+	svc := newService(t, repo, pub, nil)
+
+	got, err := svc.Publish(context.Background(), userID, owl.Label)
+	require.NoError(t, err)
+
+	assert.Equal(t, comment.StatusPublished, got.Status)
+	assert.Equal(t, 555, got.MessageID)
+	assert.Equal(t, owl.Label, got.Nickname)
+	assert.Equal(t, "привет", got.Text, "the stored text carries no markup")
+
+	require.Len(t, pub.requests, 1)
+	assert.Equal(t, comment.PublishRequest{
+		ChatID:           discussionID,
+		ReplyToMessageID: threadMsgID,
+		Text:             "<b>Сова</b>\n\nпривет",
+		Media:            draft.Media,
+	}, pub.requests[0], "the comment lands in the post's thread, signed in bold")
+
+	assert.Equal(t, owl.Label, repo.users[userID].LastNickname, "the mask is remembered for next time")
+
+	left := repo.drafts[userID]
+	assert.False(t, left.Staged(), "publishing clears the staged message")
+	assert.Equal(t, postID, left.PostID, "the post binding survives, so the author can write again")
+	assert.Empty(t, left.Body)
+}
+
+func TestPublishErrors(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name    string
+		repo    func() *fakeRepo
+		label   string
+		wantErr error
+	}{
+		{name: "no draft", repo: fullRepo, label: fox.Label, wantErr: comment.ErrNoDraft},
+		{
+			name:    "nothing staged yet",
+			repo:    func() *fakeRepo { return fullRepo().withDraft(openDraft()) },
+			label:   fox.Label,
+			wantErr: comment.ErrNothingStaged,
+		},
+		{
+			name:    "mask not in the config list",
+			repo:    func() *fakeRepo { return fullRepo().withDraft(stagedDraft()) },
+			label:   "Мамонт",
+			wantErr: comment.ErrNicknameUnavailable,
+		},
+		{
+			name: "banned while composing",
+			repo: func() *fakeRepo {
+				return fullRepo().withUser(comment.User{ID: userID, Banned: true}).withDraft(stagedDraft())
+			},
+			label:   fox.Label,
+			wantErr: comment.ErrBanned,
+		},
+		{
+			name:    "post deleted while composing",
+			repo:    func() *fakeRepo { return newRepo().withUser(comment.User{ID: userID}).withDraft(stagedDraft()) },
+			label:   fox.Label,
+			wantErr: comment.ErrUnknownPost,
+		},
+		{
+			name:    "create comment fails",
+			repo:    func() *fakeRepo { r := fullRepo().withDraft(stagedDraft()); r.createErr = errBoom; return r },
+			label:   fox.Label,
+			wantErr: errBoom,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			pub := &fakePublisher{result: comment.PublishResult{MessageID: 1}}
+			svc := newService(t, tc.repo(), pub, nil)
+
+			_, err := svc.Publish(context.Background(), userID, tc.label)
+			require.ErrorIs(t, err, tc.wantErr)
+			assert.Empty(t, pub.requests, "nothing is published when the call is refused")
+		})
+	}
+}
+
+func TestPublishMarksCommentFailedWhenTelegramRefuses(t *testing.T) {
+	t.Parallel()
+
+	repo := fullRepo().withDraft(stagedDraft())
+	pub := &fakePublisher{err: errBoom}
+	svc := newService(t, repo, pub, nil)
+
+	_, err := svc.Publish(context.Background(), userID, fox.Label)
+	require.ErrorIs(t, err, errBoom)
+
+	require.Len(t, repo.comments, 1)
+	for _, c := range repo.comments {
+		assert.Equal(t, comment.StatusFailed, c.Status, "a pending row must not be left behind")
+	}
+
+	assert.True(t, repo.drafts[userID].Staged(), "the message survives a transport failure so the author can retry")
+}
+
+func TestCancelTakesTheStagedMessageOffScreen(t *testing.T) {
+	t.Parallel()
+
+	repo := fullRepo().withDraft(stagedDraft())
+	svc := newService(t, repo, &fakePublisher{}, nil)
+
+	got, err := svc.Cancel(context.Background(), userID)
+	require.NoError(t, err)
+
+	assert.Equal(t, userID, got.ChatID)
+	assert.Equal(t, 500, got.UserMessageID)
+	assert.Equal(t, 501, got.PromptMessageID)
+
+	left := repo.drafts[userID]
+	assert.False(t, left.Staged())
+	assert.Empty(t, left.Body)
+	assert.Equal(t, postID, left.PostID, "cancelling returns to writing, still under the same post")
+}
+
+func TestCancelErrors(t *testing.T) {
 	t.Parallel()
 
 	svc := newService(t, fullRepo(), &fakePublisher{}, nil)
-	assert.Equal(t, "https://t.me/anon_bot?start=comment_42", svc.DeepLink(postID))
+	_, err := svc.Cancel(context.Background(), userID)
+	require.ErrorIs(t, err, comment.ErrNoDraft)
+
+	svc = newService(t, fullRepo().withDraft(openDraft()), &fakePublisher{}, nil)
+	_, err = svc.Cancel(context.Background(), userID)
+	require.ErrorIs(t, err, comment.ErrNothingStaged)
+}
+
+func TestExpiredDraftIsDropped(t *testing.T) {
+	t.Parallel()
+
+	stale := stagedDraft()
+	stale.CreatedAt = now.Add(-2 * time.Hour)
+	repo := fullRepo().withDraft(stale)
+	svc := newService(t, repo, &fakePublisher{}, nil)
+
+	_, err := svc.Publish(context.Background(), userID, fox.Label)
+	require.ErrorIs(t, err, comment.ErrDraftExpired)
+	assert.Empty(t, repo.drafts, "an expired draft is removed so the next tap starts clean")
+}
+
+func TestDraftAtExactTTLIsStillValid(t *testing.T) {
+	t.Parallel()
+
+	draft := stagedDraft()
+	draft.CreatedAt = now.Add(-time.Hour)
+	repo := fullRepo().withDraft(draft)
+	svc := newService(t, repo, &fakePublisher{result: comment.PublishResult{MessageID: 1}}, nil)
+
+	_, err := svc.Publish(context.Background(), userID, fox.Label)
+	require.NoError(t, err)
 }
 
 func TestDefaultsAreApplied(t *testing.T) {
 	t.Parallel()
 
-	repo := fullRepo().withDraft(comment.Draft{UserID: userID, PostID: postID, Nickname: fox.Label, CreatedAt: now})
+	repo := fullRepo().withDraft(stagedDraft())
 	pub := &fakePublisher{result: comment.PublishResult{MessageID: 1}}
 
 	// The mask list is required input; everything else must fall back to a default
@@ -489,9 +519,9 @@ func TestDefaultsAreApplied(t *testing.T) {
 	})
 	svc.SetClock(func() time.Time { return now })
 
-	_, err := svc.Submit(context.Background(), comment.SubmitRequest{UserID: userID, Text: "hi"})
+	_, err := svc.Publish(context.Background(), userID, fox.Label)
 	require.NoError(t, err)
-	assert.Equal(t, "Лис: hi", pub.requests[0].Text)
+	assert.Equal(t, "<b>Лис</b>\n\nпривет", pub.requests[0].Text)
 }
 
 func TestNicknames(t *testing.T) {
@@ -502,42 +532,20 @@ func TestNicknames(t *testing.T) {
 	got, err := svc.Nicknames()
 	require.NoError(t, err)
 	assert.Equal(t, []comment.Nickname{fox, owl}, got)
-}
 
-func TestNicknamesEmptyConfig(t *testing.T) {
-	t.Parallel()
-
-	opts := testOptions()
-	opts.Nicknames = nil
-
-	svc := comment.New(fullRepo(), &fakePublisher{}, nil, opts)
-
-	_, err := svc.Nicknames()
-	require.ErrorIs(t, err, comment.ErrNoNicknames)
-
-	_, err = svc.Start(context.Background(), userID, "comment_42")
-	require.ErrorIs(t, err, comment.ErrNoNicknames, "a config with no masks must refuse the flow, not panic")
-}
-
-func TestNicknameLookup(t *testing.T) {
-	t.Parallel()
-
-	svc := newService(t, fullRepo(), &fakePublisher{}, nil)
-
-	got, err := svc.Nickname(owl.Label)
+	found, err := svc.Nickname(owl.Label)
 	require.NoError(t, err)
-	assert.Equal(t, owl, got)
+	assert.Equal(t, owl, found)
 
 	_, err = svc.Nickname("Мамонт")
 	require.ErrorIs(t, err, comment.ErrNicknameUnavailable)
 }
 
-func newPost() comment.Post {
-	return comment.Post{
-		ChannelMessageID:    postID,
-		DiscussionChatID:    discussionID,
-		DiscussionMessageID: threadMsgID,
-	}
+func TestServiceDeepLinkUsesConfiguredUsername(t *testing.T) {
+	t.Parallel()
+
+	svc := newService(t, fullRepo(), &fakePublisher{}, nil)
+	assert.Equal(t, "https://t.me/anon_bot?start=comment_42", svc.DeepLink(postID))
 }
 
 func TestOnPostPublishedLinksAndInvites(t *testing.T) {
@@ -547,7 +555,7 @@ func TestOnPostPublishedLinksAndInvites(t *testing.T) {
 	pub := &fakePublisher{inviteResult: comment.PublishResult{MessageID: 4321}}
 	svc := newService(t, repo, pub, nil)
 
-	require.NoError(t, svc.OnPostPublished(context.Background(), newPost()))
+	require.NoError(t, svc.OnPostPublished(context.Background(), testPost()))
 
 	require.Len(t, pub.invites, 1)
 	assert.Equal(t, comment.InviteRequest{
@@ -557,8 +565,9 @@ func TestOnPostPublishedLinksAndInvites(t *testing.T) {
 	}, pub.invites[0], "the invitation replies to the forwarded post so it lands in the thread")
 
 	stored := repo.posts[postID]
-	assert.Equal(t, threadMsgID, stored.DiscussionMessageID)
 	assert.Equal(t, 4321, stored.InviteMessageID, "the invite id is what makes a redelivery a no-op")
+	assert.Equal(t, "Текст поста", stored.Body, "the post body is kept for quoting it to authors")
+	assert.Equal(t, "anon_channel", stored.ChannelUsername)
 }
 
 func TestOnPostPublishedIsIdempotent(t *testing.T) {
@@ -569,8 +578,8 @@ func TestOnPostPublishedIsIdempotent(t *testing.T) {
 	svc := newService(t, repo, pub, nil)
 
 	ctx := context.Background()
-	require.NoError(t, svc.OnPostPublished(ctx, newPost()))
-	require.NoError(t, svc.OnPostPublished(ctx, newPost()), "Telegram redelivers auto-forwards")
+	require.NoError(t, svc.OnPostPublished(ctx, testPost()))
+	require.NoError(t, svc.OnPostPublished(ctx, testPost()), "Telegram redelivers auto-forwards")
 
 	assert.Len(t, pub.invites, 1, "readers must not see two invitations under one post")
 }
@@ -583,19 +592,17 @@ func TestOnPostPublishedRetriesInviteAfterFailure(t *testing.T) {
 	svc := newService(t, repo, pub, nil)
 
 	ctx := context.Background()
-	err := svc.OnPostPublished(ctx, newPost())
-	require.ErrorIs(t, err, errBoom)
+	require.ErrorIs(t, svc.OnPostPublished(ctx, testPost()), errBoom)
 
 	// The post is linked even though the invitation failed, so comments still work
 	// through the button under the post itself.
 	assert.Equal(t, threadMsgID, repo.posts[postID].DiscussionMessageID)
 	assert.Zero(t, repo.posts[postID].InviteMessageID)
 
-	// A later redelivery gets another chance at the invitation.
 	pub.inviteErr = nil
 	pub.inviteResult = comment.PublishResult{MessageID: 4321}
 
-	require.NoError(t, svc.OnPostPublished(ctx, newPost()))
+	require.NoError(t, svc.OnPostPublished(ctx, testPost()))
 	assert.Len(t, pub.invites, 2)
 	assert.Equal(t, 4321, repo.posts[postID].InviteMessageID)
 }
@@ -619,27 +626,7 @@ func TestOnPostPublishedRepositoryErrors(t *testing.T) {
 			pub := &fakePublisher{inviteResult: comment.PublishResult{MessageID: 1}}
 			svc := newService(t, tc.repo(), pub, nil)
 
-			require.ErrorIs(t, svc.OnPostPublished(context.Background(), newPost()), errBoom)
+			require.ErrorIs(t, svc.OnPostPublished(context.Background(), testPost()), errBoom)
 		})
 	}
-}
-
-func TestOnPostPublishedUpdatesMovedThread(t *testing.T) {
-	t.Parallel()
-
-	// A post already linked but never announced: the anchor is refreshed and the
-	// invitation is posted on this pass.
-	repo := newRepo().withPost(comment.Post{
-		ChannelMessageID:    postID,
-		DiscussionChatID:    discussionID,
-		DiscussionMessageID: 1,
-	})
-	pub := &fakePublisher{inviteResult: comment.PublishResult{MessageID: 4321}}
-	svc := newService(t, repo, pub, nil)
-
-	require.NoError(t, svc.OnPostPublished(context.Background(), newPost()))
-
-	assert.Equal(t, threadMsgID, repo.posts[postID].DiscussionMessageID)
-	require.Len(t, pub.invites, 1)
-	assert.Equal(t, threadMsgID, pub.invites[0].ReplyToMessageID)
 }

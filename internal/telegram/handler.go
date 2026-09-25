@@ -3,8 +3,10 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"html"
 	"log/slog"
 	"strings"
+	"unicode/utf8"
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -12,7 +14,12 @@ import (
 	"loudbot/internal/comment"
 )
 
-const startCommand = "/start"
+const (
+	startCommand = "/start"
+	// quoteLimit keeps the quoted post short enough to stay a hint rather than a
+	// wall of text above the author's own message.
+	quoteLimit = 280
+)
 
 func (b *Bot) handleUpdate(ctx context.Context, _ *tgbot.Bot, update *models.Update) {
 	switch {
@@ -71,6 +78,8 @@ func (b *Bot) onDiscussionForward(ctx context.Context, msg *models.Message) {
 		ChannelMessageID:    channel.MessageID,
 		DiscussionChatID:    msg.Chat.ID,
 		DiscussionMessageID: msg.ID,
+		Body:                messageBody(msg),
+		ChannelUsername:     channel.Chat.Username,
 	}
 
 	if err := b.comments.OnPostPublished(ctx, post); err != nil {
@@ -102,6 +111,8 @@ func (b *Bot) onPrivateMessage(ctx context.Context, msg *models.Message) {
 	b.onComment(ctx, msg)
 }
 
+// onStart greets an author arriving from a post: it quotes the post, links back
+// to it, and asks for the comment. The mask is chosen later.
 func (b *Bot) onStart(ctx context.Context, msg *models.Message, payload string) {
 	userID := msg.From.ID
 
@@ -111,23 +122,33 @@ func (b *Bot) onStart(ctx context.Context, msg *models.Message, payload string) 
 		return
 	}
 
-	result, err := b.comments.Start(ctx, userID, payload)
+	started, err := b.comments.Start(ctx, userID, payload)
 	if err != nil {
 		b.replyError(ctx, msg.Chat.ID, "start comment draft", userID, err)
 
 		return
 	}
 
-	_, err = b.api.SendMessage(ctx, &tgbot.SendMessageParams{
-		ChatID:      msg.Chat.ID,
-		Text:        msgChooseNickname,
-		ReplyMarkup: nicknameKeyboard(result.Nicknames, result.Selected.Label),
-	})
-	if err != nil {
-		b.log.Error("send nickname keyboard", slog.Int64("user_id", userID), slog.Any("error", err))
+	params := &tgbot.SendMessageParams{
+		ChatID:    msg.Chat.ID,
+		Text:      promptText(started.Post.Body),
+		ParseMode: models.ParseModeHTML,
+	}
+
+	if started.Link != "" {
+		params.ReplyMarkup = models.InlineKeyboardMarkup{
+			InlineKeyboard: [][]models.InlineKeyboardButton{{
+				{Text: btnOpen, URL: started.Link},
+			}},
+		}
+	}
+
+	if _, err := b.api.SendMessage(ctx, params); err != nil {
+		b.log.Error("send comment prompt", slog.Int64("user_id", userID), slog.Any("error", err))
 	}
 }
 
+// onComment stages what the author wrote and asks which mask to sign it with.
 func (b *Bot) onComment(ctx context.Context, msg *models.Message) {
 	userID := msg.From.ID
 
@@ -143,13 +164,62 @@ func (b *Bot) onComment(ctx context.Context, msg *models.Message) {
 		text = msg.Caption
 	}
 
-	published, err := b.comments.Submit(ctx, comment.SubmitRequest{
-		UserID: userID,
-		Text:   text,
-		Media:  media,
+	staged, err := b.comments.Stage(ctx, comment.StageRequest{
+		UserID:    userID,
+		MessageID: msg.ID,
+		Text:      text,
+		Media:     media,
 	})
 	if err != nil {
-		b.replyError(ctx, msg.Chat.ID, "submit comment", userID, err)
+		b.replyError(ctx, msg.Chat.ID, "stage comment", userID, err)
+
+		return
+	}
+
+	// Writing again instead of picking a mask replaces the previous draft, so the
+	// keyboard that belonged to it goes away with it.
+	b.deleteMessage(ctx, msg.Chat.ID, staged.StalePromptID)
+
+	prompt, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID:      msg.Chat.ID,
+		Text:        msgChooseNickname,
+		ReplyMarkup: nicknameKeyboard(staged.Nicknames),
+	})
+	if err != nil {
+		b.log.Error("send nickname keyboard", slog.Int64("user_id", userID), slog.Any("error", err))
+
+		return
+	}
+
+	if err := b.comments.AttachPrompt(ctx, userID, prompt.ID); err != nil {
+		b.log.Error("attach nickname keyboard", slog.Int64("user_id", userID), slog.Any("error", err))
+	}
+}
+
+func (b *Bot) onCallback(ctx context.Context, query *models.CallbackQuery) {
+	switch {
+	case query.Data == comment.CancelCallback:
+		b.onCancel(ctx, query)
+	case strings.HasPrefix(query.Data, "nick:"):
+		b.onNicknameChosen(ctx, query)
+	default:
+		b.answer(ctx, query.ID, "")
+	}
+}
+
+// onNicknameChosen signs the staged message and sends it into the thread.
+func (b *Bot) onNicknameChosen(ctx context.Context, query *models.CallbackQuery) {
+	label, err := comment.ParseNicknameCallback(query.Data)
+	if err != nil {
+		b.answer(ctx, query.ID, msgErrBadPayload)
+
+		return
+	}
+
+	published, err := b.comments.Publish(ctx, query.From.ID, label)
+	if err != nil {
+		b.logCoreError("publish comment", query.From.ID, err)
+		b.answer(ctx, query.ID, userMessage(err))
 
 		return
 	}
@@ -160,89 +230,58 @@ func (b *Bot) onComment(ctx context.Context, msg *models.Message) {
 		slog.Int("message_id", published.MessageID),
 	)
 
-	mask := published.Nickname
-	if n, err := b.comments.Nickname(published.Nickname); err == nil {
-		mask = n.Display()
-	}
+	b.answer(ctx, query.ID, msgPublished)
 
-	b.reply(ctx, msg.Chat.ID, fmt.Sprintf(msgPublished, mask))
+	// The keyboard has done its job; turning it into the confirmation keeps the
+	// private chat from filling up with dead buttons.
+	b.replacePrompt(ctx, query, msgPublished)
 }
 
-func (b *Bot) onCallback(ctx context.Context, query *models.CallbackQuery) {
-	switch {
-	case strings.HasPrefix(query.Data, "nick:"):
-		b.onNicknameChosen(ctx, query)
-	case strings.HasPrefix(query.Data, "report:"):
-		b.onReport(ctx, query)
-	default:
-		b.answer(ctx, query.ID, "")
-	}
-}
-
-func (b *Bot) onNicknameChosen(ctx context.Context, query *models.CallbackQuery) {
-	label, err := comment.ParseNicknameCallback(query.Data)
+// onCancel drops the staged message, taking both it and the keyboard off screen.
+func (b *Bot) onCancel(ctx context.Context, query *models.CallbackQuery) {
+	cancelled, err := b.comments.Cancel(ctx, query.From.ID)
 	if err != nil {
-		b.answer(ctx, query.ID, msgErrBadPayload)
-
-		return
-	}
-
-	nickname, err := b.comments.ChooseNickname(ctx, query.From.ID, label)
-	if err != nil {
-		b.logCoreError("choose nickname", query.From.ID, err)
+		b.logCoreError("cancel comment", query.From.ID, err)
 		b.answer(ctx, query.ID, userMessage(err))
 
 		return
 	}
 
-	b.answer(ctx, query.ID, fmt.Sprintf(msgNicknameSet, nickname.Display()))
-	b.refreshNicknameKeyboard(ctx, query, nickname.Label)
+	b.answer(ctx, query.ID, msgCancelled)
+
+	b.deleteMessage(ctx, cancelled.ChatID, cancelled.UserMessageID)
+	b.deleteMessage(ctx, cancelled.ChatID, cancelled.PromptMessageID)
 }
 
-// refreshNicknameKeyboard re-renders the keyboard so the chosen mask is ticked.
-func (b *Bot) refreshNicknameKeyboard(ctx context.Context, query *models.CallbackQuery, selected string) {
+// replacePrompt rewrites the keyboard message in place, dropping its buttons.
+func (b *Bot) replacePrompt(ctx context.Context, query *models.CallbackQuery, text string) {
 	if query.Message.Message == nil {
 		return
 	}
 
-	nicknames, err := b.comments.Nicknames()
-	if err != nil {
-		b.log.Error("reload nicknames", slog.Any("error", err))
-
-		return
-	}
-
-	_, err = b.api.EditMessageReplyMarkup(ctx, &tgbot.EditMessageReplyMarkupParams{
-		ChatID:      query.Message.Message.Chat.ID,
-		MessageID:   query.Message.Message.ID,
-		ReplyMarkup: nicknameKeyboard(nicknames, selected),
+	_, err := b.api.EditMessageText(ctx, &tgbot.EditMessageTextParams{
+		ChatID:    query.Message.Message.Chat.ID,
+		MessageID: query.Message.Message.ID,
+		Text:      text,
 	})
 	if err != nil {
-		b.log.Debug("refresh nickname keyboard", slog.Any("error", err))
+		b.log.Debug("replace nickname keyboard", slog.Any("error", err))
 	}
 }
 
-func (b *Bot) onReport(ctx context.Context, query *models.CallbackQuery) {
-	commentID, err := comment.ParseReportCallback(query.Data)
+func (b *Bot) deleteMessage(ctx context.Context, chatID int64, messageID int) {
+	if messageID == 0 {
+		return
+	}
+
+	_, err := b.api.DeleteMessage(ctx, &tgbot.DeleteMessageParams{ChatID: chatID, MessageID: messageID})
 	if err != nil {
-		b.answer(ctx, query.ID, msgErrBadPayload)
-
-		return
+		b.log.Debug("delete message",
+			slog.Int64("chat_id", chatID),
+			slog.Int("message_id", messageID),
+			slog.Any("error", err),
+		)
 	}
-
-	if err := b.store.SaveReport(ctx, "comment", commentID, query.From.ID, ""); err != nil {
-		b.log.Error("save report", slog.Int64("comment_id", commentID), slog.Any("error", err))
-		b.answer(ctx, query.ID, msgReportFailed)
-
-		return
-	}
-
-	b.log.Info("comment reported",
-		slog.Int64("comment_id", commentID),
-		slog.Int64("reporter_id", query.From.ID),
-	)
-
-	b.answer(ctx, query.ID, msgReportAccepted)
 }
 
 // startPayload splits "/start <payload>"; ok is false for any other text.
@@ -255,19 +294,38 @@ func startPayload(text string) (string, bool) {
 	return strings.TrimSpace(strings.TrimPrefix(text, startCommand)), true
 }
 
-func nicknameKeyboard(nicknames []comment.Nickname, selected string) models.InlineKeyboardMarkup {
+// promptText asks for the comment, quoting the post so the author can see what
+// they are answering without leaving the chat.
+func promptText(body string) string {
+	quote := truncate(strings.TrimSpace(body), quoteLimit)
+	if quote == "" {
+		return msgPrompt
+	}
+
+	return "<blockquote>" + html.EscapeString(quote) + "</blockquote>\n" + msgPrompt
+}
+
+func truncate(s string, limit int) string {
+	if utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+
+	return string([]rune(s)[:limit]) + "…"
+}
+
+// nicknameKeyboard lays the masks out two per row, with cancel on its own row.
+func nicknameKeyboard(nicknames []comment.Nickname) models.InlineKeyboardMarkup {
 	const perRow = 2
 
-	rows := make([][]models.InlineKeyboardButton, 0, len(nicknames)/perRow+1)
+	rows := make([][]models.InlineKeyboardButton, 0, len(nicknames)/perRow+2)
 	row := make([]models.InlineKeyboardButton, 0, perRow)
 
 	for _, n := range nicknames {
-		text := n.Display()
-		if n.Label == selected {
-			text = "✅ " + text
-		}
+		row = append(row, models.InlineKeyboardButton{
+			Text:         n.Label,
+			CallbackData: comment.NicknameCallback(n.Label),
+		})
 
-		row = append(row, models.InlineKeyboardButton{Text: text, CallbackData: comment.NicknameCallback(n.Label)})
 		if len(row) == perRow {
 			rows = append(rows, row)
 			row = make([]models.InlineKeyboardButton, 0, perRow)
@@ -278,7 +336,20 @@ func nicknameKeyboard(nicknames []comment.Nickname, selected string) models.Inli
 		rows = append(rows, row)
 	}
 
+	rows = append(rows, []models.InlineKeyboardButton{
+		{Text: btnCancel, CallbackData: comment.CancelCallback},
+	})
+
 	return models.InlineKeyboardMarkup{InlineKeyboard: rows}
+}
+
+// messageBody is the text of a message, or the caption when it carries media.
+func messageBody(msg *models.Message) string {
+	if msg.Text != "" {
+		return msg.Text
+	}
+
+	return msg.Caption
 }
 
 // extractMedia pulls the reusable file ids out of a message. Telegram keeps the

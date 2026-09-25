@@ -6,7 +6,6 @@ package comment
 
 import (
 	"context"
-	"strings"
 	"time"
 )
 
@@ -48,31 +47,41 @@ type Nickname struct {
 	Label string
 }
 
-// Display renders the mask as readers see it in the discussion group.
-func (n Nickname) Display() string {
-	label := strings.TrimSpace(n.Label)
-
-	return label
-}
-
 // Post links a channel post to its auto-forwarded copy in the discussion group.
 // Replying to that copy is what puts a message into the post's comment thread.
 type Post struct {
 	ChannelMessageID    int
 	DiscussionChatID    int64
 	DiscussionMessageID int
+	// Body is the post's own text or caption, kept for quoting it back to an
+	// author: the Bot API offers no way to read a message by id afterwards.
+	Body string
+	// ChannelUsername is empty for a private channel, which needs a /c/ link.
+	ChannelUsername string
 	// InviteMessageID is the bot's first comment under the post, the one carrying
 	// the "comment anonymously" button. Zero means it has not been posted yet.
 	InviteMessageID int
 	CreatedAt       time.Time
 }
 
-// Draft is what a user is currently composing: which post, under which mask.
+// Draft is an author's session with the bot: the post they opened and the message
+// they have written but not yet signed. The mask is picked last, so it is not here.
 type Draft struct {
-	UserID    int64
-	PostID    int
-	Nickname  string
-	CreatedAt time.Time
+	UserID int64
+	PostID int
+	Body   string
+	Media  []Media
+	// UserMessageID is the author's staged message; zero means nothing is staged
+	// and the bot is still waiting for them to write.
+	UserMessageID int
+	// PromptMessageID is the bot's mask keyboard. Cancel deletes both ids.
+	PromptMessageID int
+	CreatedAt       time.Time
+}
+
+// Staged reports whether a message is waiting for a mask to be picked.
+func (d Draft) Staged() bool {
+	return d.UserMessageID != 0
 }
 
 type Media struct {
@@ -113,11 +122,10 @@ type Repository interface {
 	MarkCommentFailed(ctx context.Context, id int64) error
 }
 
-// PublishRequest is a ready-to-send comment; the text already carries the mask prefix.
+// PublishRequest is a ready-to-send comment; Text is already HTML with the mask
+// as its first line, so the transport sends it with the HTML parse mode.
 type PublishRequest struct {
-	// CommentID is embedded into the report button, so it must be known before sending.
-	CommentID int64
-	ChatID    int64
+	ChatID int64
 	// ReplyToMessageID is the discussion-group copy of the channel post.
 	ReplyToMessageID int
 	Text             string

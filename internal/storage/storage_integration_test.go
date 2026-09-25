@@ -138,7 +138,13 @@ func TestUserLifecycle(t *testing.T) {
 func TestPostLinking(t *testing.T) {
 	st, ctx := open(t)
 
-	post := comment.Post{ChannelMessageID: 4242, DiscussionChatID: -100500, DiscussionMessageID: 77}
+	post := comment.Post{
+		ChannelMessageID:    4242,
+		DiscussionChatID:    -100500,
+		DiscussionMessageID: 77,
+		Body:                "Текст поста",
+		ChannelUsername:     "anon_channel",
+	}
 	require.NoError(t, st.LinkPost(ctx, post))
 
 	// Telegram may deliver the auto-forward more than once.
@@ -149,6 +155,8 @@ func TestPostLinking(t *testing.T) {
 	assert.Equal(t, post.DiscussionChatID, got.DiscussionChatID)
 	assert.Equal(t, post.DiscussionMessageID, got.DiscussionMessageID)
 	assert.Zero(t, got.InviteMessageID, "a NULL invite column must read back as zero")
+	assert.Equal(t, "Текст поста", got.Body, "the body is what the bot quotes back to an author")
+	assert.Equal(t, "anon_channel", got.ChannelUsername)
 	assert.False(t, got.CreatedAt.IsZero())
 
 	require.NoError(t, st.MarkInvitePosted(ctx, post.ChannelMessageID, 555))
@@ -180,22 +188,30 @@ func TestDraftLifecycle(t *testing.T) {
 	require.ErrorIs(t, err, comment.ErrNotFound)
 
 	created := time.Now().UTC().Truncate(time.Millisecond)
-	draft := comment.Draft{UserID: userID, PostID: 4242, Nickname: fox, CreatedAt: created}
+	draft := comment.Draft{UserID: userID, PostID: 4242, CreatedAt: created}
 	require.NoError(t, st.SaveDraft(ctx, draft))
 
 	got, err := st.Draft(ctx, userID)
 	require.NoError(t, err)
 	assert.Equal(t, draft.PostID, got.PostID)
-	assert.Equal(t, draft.Nickname, got.Nickname)
+	assert.False(t, got.Staged(), "a fresh draft has nothing written yet")
+	assert.Empty(t, got.Media, "a NULL-free media column reads back as an empty slice")
 	assert.WithinDuration(t, created, got.CreatedAt, time.Millisecond)
 
-	// Switching the mask must overwrite, not duplicate: user_id is the primary key.
-	draft.Nickname = owl
+	// Staging a message must overwrite in place: user_id is the primary key.
+	draft.Body = "привет"
+	draft.Media = []comment.Media{{Type: comment.MediaPhoto, FileID: "f1", FileUniqueID: "u1"}}
+	draft.UserMessageID = 500
+	draft.PromptMessageID = 501
 	require.NoError(t, st.SaveDraft(ctx, draft))
 
 	got, err = st.Draft(ctx, userID)
 	require.NoError(t, err)
-	assert.Equal(t, owl, got.Nickname)
+	assert.Equal(t, "привет", got.Body)
+	assert.Equal(t, draft.Media, got.Media)
+	assert.True(t, got.Staged())
+	assert.Equal(t, 500, got.UserMessageID)
+	assert.Equal(t, 501, got.PromptMessageID)
 
 	require.NoError(t, st.DeleteDraft(ctx, userID))
 	_, err = st.Draft(ctx, userID)

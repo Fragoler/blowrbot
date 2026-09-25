@@ -11,17 +11,17 @@ import (
 
 const (
 	defaultMaxTextLen = 3500
-	defaultSeparator  = ": "
 	defaultDraftTTL   = time.Hour
 )
 
 // Options are the tunables the service reads from config.
 type Options struct {
 	BotUsername string
+	// ChannelID is needed to build a /c/ link back to a post in a private channel.
+	ChannelID int64
 	// Nicknames is the mask list from config.toml, in the order it is offered.
-	Nicknames         []Nickname
-	MaxTextLen        int
-	NicknameSeparator string
+	Nicknames  []Nickname
+	MaxTextLen int
 	// DraftTTL bounds how long a deep-link tap stays valid, so that an old draft
 	// cannot silently attach a new message to a stale post.
 	DraftTTL time.Duration
@@ -32,10 +32,6 @@ func (o Options) withDefaults() Options {
 		o.MaxTextLen = defaultMaxTextLen
 	}
 
-	if o.NicknameSeparator == "" {
-		o.NicknameSeparator = defaultSeparator
-	}
-
 	if o.DraftTTL <= 0 {
 		o.DraftTTL = defaultDraftTTL
 	}
@@ -43,7 +39,8 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-// Service is the core of the comment flow.
+// Service is the core of the comment flow. An author taps the button under a post,
+// writes a message, and only then picks the mask it goes out under.
 type Service struct {
 	repo  Repository
 	pub   Publisher
@@ -77,102 +74,85 @@ func (s *Service) DeepLink(channelMessageID int) string {
 	return DeepLink(s.opts.BotUsername, channelMessageID)
 }
 
-// StartResult tells the Telegram layer what keyboard to draw after a deep-link tap.
+// StartResult is what the bot shows the moment an author opens it from a post.
 type StartResult struct {
-	PostID    int
-	Nicknames []Nickname
-	Selected  Nickname
+	Post Post
+	// Link points back at the post itself.
+	Link string
 }
 
-// Start opens a draft from a /start payload and preselects the last used mask.
+// Start binds the author to the post they tapped and invites them to write. It
+// does not ask for a mask yet: that happens once there is something to sign.
 func (s *Service) Start(ctx context.Context, userID int64, payload string) (StartResult, error) {
 	postID, err := ParseStartPayload(payload)
 	if err != nil {
 		return StartResult{}, err
 	}
 
-	user, err := s.activeUser(ctx, userID)
+	if _, err := s.activeUser(ctx, userID); err != nil {
+		return StartResult{}, err
+	}
+
+	post, err := s.post(ctx, postID)
 	if err != nil {
 		return StartResult{}, err
 	}
 
-	if _, err := s.post(ctx, postID); err != nil {
+	if _, err := s.Nicknames(); err != nil {
 		return StartResult{}, err
 	}
 
-	nicknames, err := s.Nicknames()
-	if err != nil {
-		return StartResult{}, err
-	}
-
-	selected := preselect(nicknames, user.LastNickname)
-
-	draft := Draft{
-		UserID:    userID,
-		PostID:    postID,
-		Nickname:  selected.Label,
-		CreatedAt: s.now(),
-	}
+	draft := Draft{UserID: userID, PostID: postID, CreatedAt: s.now()}
 	if err := s.repo.SaveDraft(ctx, draft); err != nil {
 		return StartResult{}, fmt.Errorf("save draft: %w", err)
 	}
 
-	return StartResult{PostID: postID, Nicknames: nicknames, Selected: selected}, nil
+	return StartResult{Post: post, Link: PostLink(post, s.opts.ChannelID)}, nil
 }
 
-// ChooseNickname switches the mask of the open draft.
-func (s *Service) ChooseNickname(ctx context.Context, userID int64, label string) (Nickname, error) {
-	draft, err := s.draft(ctx, userID)
-	if err != nil {
-		return Nickname{}, err
-	}
-
-	nickname, err := s.Nickname(label)
-	if err != nil {
-		return Nickname{}, err
-	}
-
-	draft.Nickname = nickname.Label
-	if err := s.repo.SaveDraft(ctx, draft); err != nil {
-		return Nickname{}, fmt.Errorf("save draft: %w", err)
-	}
-
-	return nickname, nil
-}
-
-// SubmitRequest is the message the author sent to the bot in private.
-type SubmitRequest struct {
+// StageRequest is a message the author sent to the bot in private.
+type StageRequest struct {
 	UserID int64
-	Text   string
-	Media  []Media
+	// MessageID is the author's message, remembered so that Cancel can remove it.
+	MessageID int
+	Text      string
+	Media     []Media
 }
 
-// Submit validates the message, publishes it into the post's thread and records it.
-// The comment row is created before publication so that the report button can carry
-// its id; on a Telegram failure the row is marked failed rather than left pending.
-func (s *Service) Submit(ctx context.Context, req SubmitRequest) (Comment, error) {
-	if _, err := s.activeUser(ctx, req.UserID); err != nil {
-		return Comment{}, err
+// StageResult tells the transport what to draw, and what to clean up first.
+type StageResult struct {
+	Nicknames []Nickname
+	// StaleMessageID and StalePromptID belong to a message the author replaced by
+	// writing again instead of picking a mask. Zero when there was nothing staged.
+	StaleMessageID int
+	StalePromptID  int
+}
+
+// Stage records what the author wrote and asks for a mask. Writing again before
+// picking one replaces the staged message rather than queueing a second comment.
+func (s *Service) Stage(ctx context.Context, req StageRequest) (StageResult, error) {
+	user, err := s.activeUser(ctx, req.UserID)
+	if err != nil {
+		return StageResult{}, err
 	}
 
 	draft, err := s.draft(ctx, req.UserID)
 	if err != nil {
-		return Comment{}, err
+		return StageResult{}, err
 	}
 
-	text, err := s.validateContent(req)
+	text, err := s.validateContent(req.Text, req.Media)
 	if err != nil {
-		return Comment{}, err
+		return StageResult{}, err
 	}
 
-	post, err := s.post(ctx, draft.PostID)
-	if err != nil {
-		return Comment{}, err
+	if _, err := s.post(ctx, draft.PostID); err != nil {
+		return StageResult{}, err
 	}
 
-	nickname, err := s.Nickname(draft.Nickname)
+	nicknames, err := s.Nicknames()
 	if err != nil {
-		return Comment{}, err
+		return StageResult{}, err
 	}
 
 	guardReq := GuardRequest{
@@ -182,15 +162,73 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (Comment, error
 		HasMedia: len(req.Media) > 0,
 	}
 	if err := s.guard.Check(ctx, guardReq); err != nil {
+		return StageResult{}, err
+	}
+
+	stale := StageResult{StaleMessageID: draft.UserMessageID, StalePromptID: draft.PromptMessageID}
+
+	draft.Body = text
+	draft.Media = req.Media
+	draft.UserMessageID = req.MessageID
+	draft.PromptMessageID = 0
+
+	if err := s.repo.SaveDraft(ctx, draft); err != nil {
+		return StageResult{}, fmt.Errorf("save draft: %w", err)
+	}
+
+	stale.Nicknames = orderNicknames(nicknames, user.LastNickname)
+
+	return stale, nil
+}
+
+// AttachPrompt remembers the mask keyboard the transport has just sent, so that
+// Cancel — or a replacement message — can take it down again.
+func (s *Service) AttachPrompt(ctx context.Context, userID int64, promptMessageID int) error {
+	draft, err := s.draft(ctx, userID)
+	if err != nil {
+		return err
+	}
+
+	draft.PromptMessageID = promptMessageID
+	if err := s.repo.SaveDraft(ctx, draft); err != nil {
+		return fmt.Errorf("save draft: %w", err)
+	}
+
+	return nil
+}
+
+// Publish signs the staged message with the chosen mask and sends it into the
+// post's thread. The post binding survives, so the author can write again.
+func (s *Service) Publish(ctx context.Context, userID int64, label string) (Comment, error) {
+	if _, err := s.activeUser(ctx, userID); err != nil {
+		return Comment{}, err
+	}
+
+	draft, err := s.draft(ctx, userID)
+	if err != nil {
+		return Comment{}, err
+	}
+
+	if !draft.Staged() {
+		return Comment{}, ErrNothingStaged
+	}
+
+	post, err := s.post(ctx, draft.PostID)
+	if err != nil {
+		return Comment{}, err
+	}
+
+	nickname, err := s.Nickname(label)
+	if err != nil {
 		return Comment{}, err
 	}
 
 	c := Comment{
-		UserID:    req.UserID,
+		UserID:    userID,
 		PostID:    draft.PostID,
 		Nickname:  nickname.Label,
-		Text:      text,
-		Media:     req.Media,
+		Text:      draft.Body,
+		Media:     draft.Media,
 		Status:    StatusPending,
 		CreatedAt: s.now(),
 	}
@@ -202,11 +240,10 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (Comment, error
 	c.ID = id
 
 	published, err := s.pub.PublishComment(ctx, PublishRequest{
-		CommentID:        id,
 		ChatID:           post.DiscussionChatID,
 		ReplyToMessageID: post.DiscussionMessageID,
-		Text:             FormatBody(nickname, text, s.opts.NicknameSeparator),
-		Media:            req.Media,
+		Text:             FormatBody(nickname, draft.Body),
+		Media:            draft.Media,
 	})
 	if err != nil {
 		if markErr := s.repo.MarkCommentFailed(ctx, id); markErr != nil {
@@ -220,12 +257,12 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (Comment, error
 		return Comment{}, fmt.Errorf("mark comment published: %w", err)
 	}
 
-	if err := s.repo.SetLastNickname(ctx, req.UserID, nickname.Label); err != nil {
+	if err := s.repo.SetLastNickname(ctx, userID, nickname.Label); err != nil {
 		return Comment{}, fmt.Errorf("set last nickname: %w", err)
 	}
 
-	if err := s.repo.DeleteDraft(ctx, req.UserID); err != nil {
-		return Comment{}, fmt.Errorf("delete draft: %w", err)
+	if err := s.clearStaged(ctx, draft); err != nil {
+		return Comment{}, err
 	}
 
 	c.MessageID = published.MessageID
@@ -234,10 +271,55 @@ func (s *Service) Submit(ctx context.Context, req SubmitRequest) (Comment, error
 	return c, nil
 }
 
-func (s *Service) validateContent(req SubmitRequest) (string, error) {
-	text := strings.TrimSpace(req.Text)
+// CancelResult names the two messages the transport removes from the private chat.
+type CancelResult struct {
+	ChatID          int64
+	UserMessageID   int
+	PromptMessageID int
+}
 
-	if text == "" && len(req.Media) == 0 {
+// Cancel drops the staged message and returns the author to writing. The draft
+// keeps its post, so the invitation above is still the one they are answering.
+func (s *Service) Cancel(ctx context.Context, userID int64) (CancelResult, error) {
+	draft, err := s.draft(ctx, userID)
+	if err != nil {
+		return CancelResult{}, err
+	}
+
+	if !draft.Staged() {
+		return CancelResult{}, ErrNothingStaged
+	}
+
+	result := CancelResult{
+		ChatID:          userID,
+		UserMessageID:   draft.UserMessageID,
+		PromptMessageID: draft.PromptMessageID,
+	}
+
+	if err := s.clearStaged(ctx, draft); err != nil {
+		return CancelResult{}, err
+	}
+
+	return result, nil
+}
+
+func (s *Service) clearStaged(ctx context.Context, draft Draft) error {
+	draft.Body = ""
+	draft.Media = nil
+	draft.UserMessageID = 0
+	draft.PromptMessageID = 0
+
+	if err := s.repo.SaveDraft(ctx, draft); err != nil {
+		return fmt.Errorf("clear staged draft: %w", err)
+	}
+
+	return nil
+}
+
+func (s *Service) validateContent(text string, media []Media) (string, error) {
+	text = strings.TrimSpace(text)
+
+	if text == "" && len(media) == 0 {
 		return "", ErrEmptyComment
 	}
 
@@ -319,15 +401,31 @@ func (s *Service) Nicknames() ([]Nickname, error) {
 	return s.opts.Nicknames, nil
 }
 
-// preselect keeps the last used mask when it is still on the list.
-func preselect(nicknames []Nickname, last string) Nickname {
+// orderNicknames moves the author's last mask to the front, leaving the config
+// order otherwise intact. It never mutates the configured slice.
+func orderNicknames(nicknames []Nickname, last string) []Nickname {
+	if last == "" {
+		return nicknames
+	}
+
+	out := make([]Nickname, 0, len(nicknames))
 	for _, n := range nicknames {
 		if n.Label == last {
-			return n
+			out = append(out, n)
 		}
 	}
 
-	return nicknames[0]
+	if len(out) == 0 {
+		return nicknames
+	}
+
+	for _, n := range nicknames {
+		if n.Label != last {
+			out = append(out, n)
+		}
+	}
+
+	return out
 }
 
 // OnPostPublished records the discussion-group anchor of a new channel post and

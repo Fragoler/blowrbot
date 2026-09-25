@@ -64,10 +64,6 @@ func TestCallbackRoundTrip(t *testing.T) {
 		require.NoError(t, err, label)
 		assert.Equal(t, label, got)
 	}
-
-	report, err := comment.ParseReportCallback(comment.ReportCallback(99))
-	require.NoError(t, err)
-	assert.Equal(t, int64(99), report)
 }
 
 func TestNicknameCallbackFits(t *testing.T) {
@@ -83,43 +79,13 @@ func TestNicknameCallbackFits(t *testing.T) {
 func TestCallbackParseRejectsForeignData(t *testing.T) {
 	t.Parallel()
 
-	// A nickname parser must not accept a report payload and vice versa.
-	_, err := comment.ParseNicknameCallback(comment.ReportCallback(5))
-	require.ErrorIs(t, err, comment.ErrBadPayload)
-
-	_, err = comment.ParseReportCallback(comment.NicknameCallback("Лис"))
+	// Cancel travels as its own fixed value and must not parse as a mask.
+	_, err := comment.ParseNicknameCallback(comment.CancelCallback)
 	require.ErrorIs(t, err, comment.ErrBadPayload)
 
 	for _, data := range []string{"", "nick:", "nick:   ", "Лис"} {
 		_, err := comment.ParseNicknameCallback(data)
 		require.ErrorIs(t, err, comment.ErrBadPayload, data)
-	}
-
-	for _, data := range []string{"", "report:", "report:x", "report:0", "report:-3"} {
-		_, err := comment.ParseReportCallback(data)
-		require.Error(t, err, data)
-	}
-}
-
-func TestNicknameDisplay(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name string
-		nick comment.Nickname
-		want string
-	}{
-		{name: "label", nick: comment.Nickname{Label: "Лис"}, want: "Лис"},
-		{name: "trims", nick: comment.Nickname{Label: " Лис "}, want: "Лис"},
-		{name: "empty", nick: comment.Nickname{}, want: ""},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			assert.Equal(t, tc.want, tc.nick.Display())
-		})
 	}
 }
 
@@ -134,18 +100,45 @@ func TestFormatBody(t *testing.T) {
 		text string
 		want string
 	}{
-		{name: "text", nick: nick, text: "привет", want: "Лис: привет"},
-		{name: "trims text", nick: nick, text: "  привет  ", want: "Лис: привет"},
-		{name: "media only keeps the mask alone", nick: nick, text: "", want: "Лис"},
-		{name: "blank mask falls back to text", nick: comment.Nickname{}, text: "привет", want: "привет"},
-		{name: "multiline text", nick: nick, text: "one\ntwo", want: "Лис: one\ntwo"},
+		{name: "mask in bold, then a blank line", nick: nick, text: "привет", want: "<b>Лис</b>\n\nпривет"},
+		{name: "trims text", nick: nick, text: "  привет  ", want: "<b>Лис</b>\n\nпривет"},
+		{name: "media only keeps the mask alone", nick: nick, text: "", want: "<b>Лис</b>"},
+		{name: "multiline text survives", nick: nick, text: "one\ntwo", want: "<b>Лис</b>\n\none\ntwo"},
+		{
+			// Telegram parses the result as HTML, so a comment cannot inject markup.
+			name: "markup in the text is escaped",
+			nick: nick,
+			text: "<b>жирный</b> & <script>",
+			want: "<b>Лис</b>\n\n&lt;b&gt;жирный&lt;/b&gt; &amp; &lt;script&gt;",
+		},
+		{
+			name: "markup in the mask is escaped too",
+			nick: comment.Nickname{Label: "<i>Лис"},
+			text: "привет",
+			want: "<b>&lt;i&gt;Лис</b>\n\nпривет",
+		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, comment.FormatBody(tc.nick, tc.text, ": "))
+			assert.Equal(t, tc.want, comment.FormatBody(tc.nick, tc.text))
 		})
 	}
+}
+
+func TestPostLink(t *testing.T) {
+	t.Parallel()
+
+	public := comment.Post{ChannelMessageID: 42, ChannelUsername: "anon_channel"}
+	assert.Equal(t, "https://t.me/anon_channel/42", comment.PostLink(public, -1001234567890))
+
+	withAt := comment.Post{ChannelMessageID: 42, ChannelUsername: "@anon_channel"}
+	assert.Equal(t, "https://t.me/anon_channel/42", comment.PostLink(withAt, -1001234567890))
+
+	// A private channel has no username, so the link takes the /c/ form with the
+	// -100 supergroup prefix stripped off the channel id.
+	private := comment.Post{ChannelMessageID: 42}
+	assert.Equal(t, "https://t.me/c/1234567890/42", comment.PostLink(private, -1001234567890))
 }

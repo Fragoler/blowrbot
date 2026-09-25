@@ -14,28 +14,20 @@ import (
 	"loudbot/internal/config"
 )
 
-// store is the part of the repository this layer needs directly; everything else
-// goes through the core services.
-type store interface {
-	SaveReport(ctx context.Context, targetType string, targetID, reporterID int64, reason string) error
-}
-
 // Bot wires the Telegram client to the comment core.
 type Bot struct {
 	api      *tgbot.Bot
 	cfg      config.Config
 	log      *slog.Logger
 	comments *comment.Service
-	store    store
 }
 
 // New builds the Telegram client. The comment service is attached afterwards with
 // UseComments, because it needs the publisher that only an existing client provides.
-func New(cfg config.Config, st store, log *slog.Logger) (*Bot, error) {
+func New(cfg config.Config, log *slog.Logger) (*Bot, error) {
 	b := &Bot{
-		cfg:   cfg,
-		log:   log,
-		store: st,
+		cfg: cfg,
+		log: log,
 	}
 
 	opts := []tgbot.Option{

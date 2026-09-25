@@ -18,14 +18,26 @@ CREATE TABLE posts (
     discussion_chat_id    BIGINT      NOT NULL,
     discussion_message_id INTEGER     NOT NULL,
     invite_message_id     INTEGER,
+    -- body and channel_username are captured from the auto-forward: the Bot API
+    -- cannot fetch a message by id later, and both are needed to quote the post
+    -- and link to it when an author opens the bot.
+    body                  TEXT        NOT NULL DEFAULT '',
+    channel_username      TEXT        NOT NULL DEFAULT '',
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- A draft is the author's session with the bot: which post they opened, and the
+-- message they have written but not yet signed. The nickname is chosen last, so
+-- it is not stored here. A non-zero user_message_id means a message is staged and
+-- the bot is waiting for a nickname; the two message ids are what "cancel" deletes.
 CREATE TABLE comment_drafts (
-    user_id    BIGINT PRIMARY KEY REFERENCES users (user_id) ON DELETE CASCADE,
-    post_id    INTEGER     NOT NULL,
-    nickname   TEXT        NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    user_id           BIGINT PRIMARY KEY REFERENCES users (user_id) ON DELETE CASCADE,
+    post_id           INTEGER     NOT NULL,
+    body              TEXT        NOT NULL DEFAULT '',
+    media_json        JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    user_message_id   INTEGER     NOT NULL DEFAULT 0,
+    prompt_message_id INTEGER     NOT NULL DEFAULT 0,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE TABLE comments (

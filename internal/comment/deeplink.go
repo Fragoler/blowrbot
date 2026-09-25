@@ -2,6 +2,7 @@ package comment
 
 import (
 	"fmt"
+	"html"
 	"strconv"
 	"strings"
 )
@@ -9,9 +10,10 @@ import (
 const (
 	// startPrefix marks a /start payload that opens a comment draft.
 	startPrefix = "comment_"
-	// nicknamePrefix and reportPrefix namespace the inline callback data.
+	// nicknamePrefix namespaces the inline callback data of a mask button.
 	nicknamePrefix = "nick:"
-	reportPrefix   = "report:"
+	// CancelCallback is the callback data of the button that drops a staged message.
+	CancelCallback = "cancel"
 
 	// maxPayloadLen is the Telegram limit for a /start payload.
 	maxPayloadLen = 64
@@ -71,43 +73,30 @@ func ParseNicknameCallback(data string) (string, error) {
 	return raw, nil
 }
 
-// ReportCallback builds the callback data of the "report" button under a comment.
-func ReportCallback(commentID int64) string {
-	return reportPrefix + strconv.FormatInt(commentID, 10)
-}
-
-// ParseReportCallback reads a comment id back from callback data.
-func ParseReportCallback(data string) (int64, error) {
-	return parseIDCallback(data, reportPrefix)
-}
-
-func parseIDCallback(data, prefix string) (int64, error) {
-	raw, ok := strings.CutPrefix(strings.TrimSpace(data), prefix)
-	if !ok {
-		return 0, fmt.Errorf("%w: %q", ErrBadPayload, data)
-	}
-
-	id, err := strconv.ParseInt(raw, 10, 64)
-	if err != nil || id <= 0 {
-		return 0, fmt.Errorf("%w: %q", ErrBadPayload, data)
-	}
-
-	return id, nil
-}
-
-// FormatBody prefixes the comment text with the chosen mask. A media-only comment
-// carries just the mask as its caption.
-func FormatBody(nickname Nickname, text, separator string) string {
-	name := nickname.Display()
+// FormatBody renders a comment for the discussion group: the mask in bold, then a
+// blank line, then the author's words. The result is Telegram HTML, so both parts
+// are escaped — a comment containing "<b>" must read as text, not as markup.
+func FormatBody(nickname Nickname, text string) string {
+	name := "<b>" + html.EscapeString(strings.TrimSpace(nickname.Label)) + "</b>"
 
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return name
 	}
 
-	if name == "" {
-		return text
+	return name + "\n\n" + html.EscapeString(text)
+}
+
+// PostLink builds a link a reader can follow back to the post itself. A public
+// channel is addressed by its @username; a private one by the /c/ form, which
+// takes the channel id with the -100 supergroup prefix stripped.
+func PostLink(post Post, channelID int64) string {
+	if name := strings.TrimPrefix(strings.TrimSpace(post.ChannelUsername), "@"); name != "" {
+		return fmt.Sprintf("https://t.me/%s/%d", name, post.ChannelMessageID)
 	}
 
-	return name + separator + text
+	internal := strconv.FormatInt(channelID, 10)
+	internal = strings.TrimPrefix(internal, "-100")
+
+	return fmt.Sprintf("https://t.me/c/%s/%d", internal, post.ChannelMessageID)
 }

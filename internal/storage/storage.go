@@ -84,13 +84,18 @@ func (s *Storage) SetLastNickname(ctx context.Context, userID int64, nickname st
 // the auto-forward update, which may arrive more than once.
 func (s *Storage) LinkPost(ctx context.Context, post comment.Post) error {
 	const q = `
-INSERT INTO posts (channel_message_id, discussion_chat_id, discussion_message_id)
-VALUES ($1, $2, $3)
+INSERT INTO posts (channel_message_id, discussion_chat_id, discussion_message_id, body, channel_username)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (channel_message_id) DO UPDATE
 SET discussion_chat_id = EXCLUDED.discussion_chat_id,
-    discussion_message_id = EXCLUDED.discussion_message_id`
+    discussion_message_id = EXCLUDED.discussion_message_id,
+    body = EXCLUDED.body,
+    channel_username = EXCLUDED.channel_username`
 
-	if _, err := s.pool.Exec(ctx, q, post.ChannelMessageID, post.DiscussionChatID, post.DiscussionMessageID); err != nil {
+	if _, err := s.pool.Exec(ctx, q,
+		post.ChannelMessageID, post.DiscussionChatID, post.DiscussionMessageID,
+		post.Body, post.ChannelUsername,
+	); err != nil {
 		return fmt.Errorf("link post %d: %w", post.ChannelMessageID, err)
 	}
 
@@ -100,12 +105,13 @@ SET discussion_chat_id = EXCLUDED.discussion_chat_id,
 func (s *Storage) Post(ctx context.Context, channelMessageID int) (comment.Post, error) {
 	const q = `
 SELECT channel_message_id, discussion_chat_id, discussion_message_id,
-       COALESCE(invite_message_id, 0), created_at
+       COALESCE(invite_message_id, 0), body, channel_username, created_at
 FROM posts WHERE channel_message_id = $1`
 
 	var p comment.Post
 	err := s.pool.QueryRow(ctx, q, channelMessageID).
-		Scan(&p.ChannelMessageID, &p.DiscussionChatID, &p.DiscussionMessageID, &p.InviteMessageID, &p.CreatedAt)
+		Scan(&p.ChannelMessageID, &p.DiscussionChatID, &p.DiscussionMessageID,
+			&p.InviteMessageID, &p.Body, &p.ChannelUsername, &p.CreatedAt)
 	if err != nil {
 		return comment.Post{}, notFound(err)
 	}
@@ -126,14 +132,25 @@ func (s *Storage) MarkInvitePosted(ctx context.Context, channelMessageID, invite
 
 func (s *Storage) SaveDraft(ctx context.Context, draft comment.Draft) error {
 	const q = `
-INSERT INTO comment_drafts (user_id, post_id, nickname, created_at)
-VALUES ($1, $2, $3, $4)
+INSERT INTO comment_drafts (user_id, post_id, body, media_json, user_message_id, prompt_message_id, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (user_id) DO UPDATE
 SET post_id = EXCLUDED.post_id,
-    nickname = EXCLUDED.nickname,
+    body = EXCLUDED.body,
+    media_json = EXCLUDED.media_json,
+    user_message_id = EXCLUDED.user_message_id,
+    prompt_message_id = EXCLUDED.prompt_message_id,
     created_at = EXCLUDED.created_at`
 
-	if _, err := s.pool.Exec(ctx, q, draft.UserID, draft.PostID, draft.Nickname, draft.CreatedAt); err != nil {
+	media, err := json.Marshal(nonNilMedia(draft.Media))
+	if err != nil {
+		return fmt.Errorf("encode draft media: %w", err)
+	}
+
+	if _, err := s.pool.Exec(ctx, q,
+		draft.UserID, draft.PostID, draft.Body, media,
+		draft.UserMessageID, draft.PromptMessageID, draft.CreatedAt,
+	); err != nil {
 		return fmt.Errorf("save draft: %w", err)
 	}
 
@@ -141,11 +158,23 @@ SET post_id = EXCLUDED.post_id,
 }
 
 func (s *Storage) Draft(ctx context.Context, userID int64) (comment.Draft, error) {
-	const q = `SELECT user_id, post_id, nickname, created_at FROM comment_drafts WHERE user_id = $1`
+	const q = `
+SELECT user_id, post_id, body, media_json, user_message_id, prompt_message_id, created_at
+FROM comment_drafts WHERE user_id = $1`
 
-	var d comment.Draft
-	if err := s.pool.QueryRow(ctx, q, userID).Scan(&d.UserID, &d.PostID, &d.Nickname, &d.CreatedAt); err != nil {
+	var (
+		d     comment.Draft
+		media []byte
+	)
+
+	err := s.pool.QueryRow(ctx, q, userID).
+		Scan(&d.UserID, &d.PostID, &d.Body, &media, &d.UserMessageID, &d.PromptMessageID, &d.CreatedAt)
+	if err != nil {
 		return comment.Draft{}, notFound(err)
+	}
+
+	if err := json.Unmarshal(media, &d.Media); err != nil {
+		return comment.Draft{}, fmt.Errorf("decode draft media: %w", err)
 	}
 
 	return d, nil

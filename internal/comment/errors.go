@@ -14,6 +14,7 @@ var (
 	ErrUnknownPost         = errors.New("unknown post")
 	ErrNoNicknames         = errors.New("no active nicknames")
 	ErrNoDraft             = errors.New("no active comment draft")
+	ErrNothingStaged       = errors.New("no message is waiting for a mask")
 	ErrDraftExpired        = errors.New("comment draft expired")
 	ErrNicknameUnavailable = errors.New("nickname is unavailable")
 	ErrEmptyComment        = errors.New("comment has neither text nor media")

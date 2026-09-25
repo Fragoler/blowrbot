@@ -2,7 +2,9 @@ package telegram
 
 import (
 	"errors"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/go-telegram/bot/models"
 	"github.com/stretchr/testify/assert"
@@ -42,18 +44,19 @@ func TestStartPayload(t *testing.T) {
 func TestNicknameKeyboard(t *testing.T) {
 	t.Parallel()
 
-	nicknames := []comment.Nickname{
-		{Label: "Лис"},
-		{Label: "Сова"},
-		{Label: "Ёж"},
-	}
+	nicknames := []comment.Nickname{{Label: "Лис"}, {Label: "Сова"}, {Label: "Ёж"}}
 
-	markup := nicknameKeyboard(nicknames, "Сова")
+	markup := nicknameKeyboard(nicknames)
 
-	require.Len(t, markup.InlineKeyboard, 2, "two per row leaves a trailing row of one")
+	require.Len(t, markup.InlineKeyboard, 3, "two per row, then the odd one, then cancel")
 	assert.Equal(t, "Лис", markup.InlineKeyboard[0][0].Text)
-	assert.Equal(t, "✅ Сова", markup.InlineKeyboard[0][1].Text, "the chosen mask is ticked")
+	assert.Equal(t, "Сова", markup.InlineKeyboard[0][1].Text)
 	assert.Equal(t, "Ёж", markup.InlineKeyboard[1][0].Text)
+
+	cancel := markup.InlineKeyboard[2]
+	require.Len(t, cancel, 1, "cancel gets a row of its own")
+	assert.Equal(t, btnCancel, cancel[0].Text)
+	assert.Equal(t, comment.CancelCallback, cancel[0].CallbackData)
 
 	label, err := comment.ParseNicknameCallback(markup.InlineKeyboard[1][0].CallbackData)
 	require.NoError(t, err)
@@ -67,10 +70,37 @@ func TestNicknameKeyboard(t *testing.T) {
 	}
 }
 
-func TestNicknameKeyboardEmpty(t *testing.T) {
+func TestNicknameKeyboardWithoutMasks(t *testing.T) {
 	t.Parallel()
 
-	assert.Empty(t, nicknameKeyboard(nil, "").InlineKeyboard)
+	markup := nicknameKeyboard(nil)
+	require.Len(t, markup.InlineKeyboard, 1, "cancel is always offered")
+	assert.Equal(t, btnCancel, markup.InlineKeyboard[0][0].Text)
+}
+
+func TestPromptText(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, msgPrompt, promptText("  "), "a post with no text is not quoted at all")
+
+	quoted := promptText("Текст поста")
+	assert.Contains(t, quoted, "<blockquote>Текст поста</blockquote>")
+	assert.Contains(t, quoted, msgPrompt)
+
+	// The quote is sent as HTML, so a post containing markup must not break it.
+	assert.Contains(t, promptText("<b>жирный</b>"), "&lt;b&gt;жирный&lt;/b&gt;")
+
+	long := promptText(strings.Repeat("я", quoteLimit+50))
+	assert.Contains(t, long, "…", "a long post is cut down to a hint")
+	assert.Less(t, utf8.RuneCountInString(long), quoteLimit+len([]rune(msgPrompt))+40)
+}
+
+func TestMessageBody(t *testing.T) {
+	t.Parallel()
+
+	assert.Equal(t, "текст", messageBody(&models.Message{Text: "текст"}))
+	assert.Equal(t, "подпись", messageBody(&models.Message{Caption: "подпись"}))
+	assert.Empty(t, messageBody(&models.Message{}))
 }
 
 func TestExtractMedia(t *testing.T) {
@@ -148,6 +178,7 @@ func TestUserMessage(t *testing.T) {
 		want string
 	}{
 		{name: "guard reason reaches the author", err: &comment.RejectedError{Reason: "слишком часто"}, want: "слишком часто"},
+		{name: "nothing staged", err: comment.ErrNothingStaged, want: msgErrNothing},
 		{name: "banned", err: comment.ErrBanned, want: msgErrBanned},
 		{name: "wrapped sentinel", err: errors.Join(errors.New("ctx"), comment.ErrDraftExpired), want: msgErrDraftExpired},
 		{name: "no draft", err: comment.ErrNoDraft, want: msgErrNoDraft},
@@ -167,6 +198,7 @@ func TestExpected(t *testing.T) {
 	t.Parallel()
 
 	assert.True(t, expected(comment.ErrEmptyComment))
+	assert.True(t, expected(comment.ErrNothingStaged))
 	assert.True(t, expected(&comment.RejectedError{Reason: "стоп-слово"}))
 	assert.False(t, expected(errors.New("boom")), "a real failure must still be logged as an error")
 }

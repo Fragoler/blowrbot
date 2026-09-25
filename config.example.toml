@@ -25,7 +25,6 @@ chat_id = -1001111111111    # private moderators chat
 
 [comments]
 max_text_len = 3500
-nickname_separator = ": "
 draft_ttl = "1h"          # how long a "comment" tap stays valid
 
 # The bot's first comment under every post, the one carrying the button.
@@ -38,24 +37,22 @@ invite_text = "Комментарии к этому посту анонимны�
 # Telegram's 64-byte callback_data limit once "nick:" is prepended.
 [[nicknames]]
 label = "Лис"
-emoji = "🦊"
 
 [[nicknames]]
 label = "Сова"
-emoji = "🦉"
 
 [[nicknames]]
 label = "Ёж"
-emoji = "🦔"
+
 
 [[nicknames]]
 label = "Кит"
-emoji = "🐳"
+
 
 [[nicknames]]
 label = "Барсук"
-emoji = "🦡"
+
 
 [[nicknames]]
 label = "Выдра"
-emoji = "🦦"
+
