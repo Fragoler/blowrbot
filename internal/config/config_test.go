@@ -216,3 +216,70 @@ func TestExampleConfigIsValid(t *testing.T) {
 	_, err = cfg.Comments.TTL()
 	require.NoError(t, err)
 }
+
+func TestMessagesDefaultWhenAbsent(t *testing.T) {
+	t.Setenv(config.EnvBotToken, "t")
+
+	cfg, err := config.Load(write(t, validTOML))
+	require.NoError(t, err)
+	assert.Equal(t, config.DefaultMessages(), cfg.Messages, "a config with no [messages] gets the built-in copy")
+}
+
+func TestMessagesOverrideOnlyWhatIsListed(t *testing.T) {
+	t.Setenv(config.EnvBotToken, "t")
+
+	body := validTOML + "\n[messages]\nreply_link = \"ответ\"\n\n[messages.errors]\nbanned = \"Нельзя.\"\n"
+
+	cfg, err := config.Load(write(t, body))
+	require.NoError(t, err)
+
+	assert.Equal(t, "ответ", cfg.Messages.ReplyLink)
+	assert.Equal(t, "Нельзя.", cfg.Messages.Errors.Banned)
+
+	defaults := config.DefaultMessages()
+	assert.Equal(t, defaults.ButtonCancel, cfg.Messages.ButtonCancel, "untouched keys keep their default")
+	assert.Equal(t, defaults.Errors.Internal, cfg.Messages.Errors.Internal)
+}
+
+func TestMessagesRejectBlankLines(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "blank reply link",
+			body: "[messages]\nreply_link = \"\"\n",
+			want: "messages.reply_link is empty",
+		},
+		{
+			name: "whitespace-only button",
+			body: "[messages]\nbutton_cancel = \"   \"\n",
+			want: "messages.button_cancel is empty",
+		},
+		{
+			name: "blank error line",
+			body: "[messages.errors]\ninternal = \"\"\n",
+			want: "messages.errors.internal is empty",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(config.EnvBotToken, "t")
+
+			_, err := config.Load(write(t, validTOML+"\n"+tc.body))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
+func TestDefaultMessagesAreComplete(t *testing.T) {
+	t.Setenv(config.EnvBotToken, "t")
+
+	// Every field must be filled in, or a new one added later ships blank.
+	cfg, err := config.Load(write(t, validTOML))
+	require.NoError(t, err)
+	require.NoError(t, cfg.Validate())
+}

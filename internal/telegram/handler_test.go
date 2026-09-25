@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"loudbot/internal/comment"
+	"loudbot/internal/config"
 )
 
 func TestStartPayload(t *testing.T) {
@@ -46,7 +47,7 @@ func TestNicknameKeyboard(t *testing.T) {
 
 	nicknames := []comment.Nickname{{Label: "Лис"}, {Label: "Сова"}, {Label: "Ёж"}}
 
-	markup := nicknameKeyboard(nicknames)
+	markup := nicknameKeyboard(nicknames, "Отмена")
 
 	require.Len(t, markup.InlineKeyboard, 3, "two per row, then the odd one, then cancel")
 	assert.Equal(t, "Лис", markup.InlineKeyboard[0][0].Text)
@@ -55,7 +56,7 @@ func TestNicknameKeyboard(t *testing.T) {
 
 	cancel := markup.InlineKeyboard[2]
 	require.Len(t, cancel, 1, "cancel gets a row of its own")
-	assert.Equal(t, btnCancel, cancel[0].Text)
+	assert.Equal(t, "Отмена", cancel[0].Text)
 	assert.Equal(t, comment.CancelCallback, cancel[0].CallbackData)
 
 	label, err := comment.ParseNicknameCallback(markup.InlineKeyboard[1][0].CallbackData)
@@ -73,42 +74,46 @@ func TestNicknameKeyboard(t *testing.T) {
 func TestNicknameKeyboardWithoutMasks(t *testing.T) {
 	t.Parallel()
 
-	markup := nicknameKeyboard(nil)
+	markup := nicknameKeyboard(nil, "Отмена")
 	require.Len(t, markup.InlineKeyboard, 1, "cancel is always offered")
-	assert.Equal(t, btnCancel, markup.InlineKeyboard[0][0].Text)
+	assert.Equal(t, "Отмена", markup.InlineKeyboard[0][0].Text)
 }
 
 func TestPromptText(t *testing.T) {
 	t.Parallel()
 
-	assert.Equal(t, msgPrompt, promptText("  ", msgPrompt), "a post with no text is not quoted at all")
+	msgs := config.DefaultMessages()
 
-	quoted := promptText("Текст поста", msgPrompt)
+	assert.Equal(t, msgs.Prompt, promptText("  ", msgs.Prompt), "a post with no text is not quoted at all")
+
+	quoted := promptText("Текст поста", msgs.Prompt)
 	assert.Contains(t, quoted, "<blockquote>Текст поста</blockquote>")
-	assert.Contains(t, quoted, msgPrompt)
+	assert.Contains(t, quoted, msgs.Prompt)
 
 	// The quote is sent as HTML, so a post containing markup must not break it.
-	assert.Contains(t, promptText("<b>жирный</b>", msgPrompt), "&lt;b&gt;жирный&lt;/b&gt;")
+	assert.Contains(t, promptText("<b>жирный</b>", msgs.Prompt), "&lt;b&gt;жирный&lt;/b&gt;")
 
-	long := promptText(strings.Repeat("я", quoteLimit+50), msgPrompt)
+	long := promptText(strings.Repeat("я", quoteLimit+50), msgs.Prompt)
 	assert.Contains(t, long, "…", "a long post is cut down to a hint")
-	assert.Less(t, utf8.RuneCountInString(long), quoteLimit+len([]rune(msgPrompt))+40)
+	assert.Less(t, utf8.RuneCountInString(long), quoteLimit+len([]rune(msgs.Prompt))+40)
 }
 
 func TestStartPrompt(t *testing.T) {
 	t.Parallel()
 
-	onPost := startPrompt(comment.StartResult{Post: comment.Post{Body: "Текст поста"}})
+	msgs := config.DefaultMessages()
+
+	onPost := startPrompt(comment.StartResult{Post: comment.Post{Body: "Текст поста"}}, msgs)
 	assert.Contains(t, onPost, "<blockquote>Текст поста</blockquote>")
-	assert.Contains(t, onPost, msgPrompt)
+	assert.Contains(t, onPost, msgs.Prompt)
 
 	onComment := startPrompt(comment.StartResult{
 		Post:    comment.Post{Body: "Текст поста"},
 		ReplyTo: comment.Comment{ID: 7, Nickname: "Сова", Text: "а где продолжение?"},
-	})
+	}, msgs)
 	assert.Contains(t, onComment, "<blockquote>Сова: а где продолжение?</blockquote>",
 		"a reply quotes the comment it answers, not the post")
-	assert.Contains(t, onComment, msgReplyPrompt)
+	assert.Contains(t, onComment, msgs.ReplyPrompt)
 	assert.NotContains(t, onComment, "Текст поста")
 }
 
@@ -189,25 +194,27 @@ func TestExtractMedia(t *testing.T) {
 func TestUserMessage(t *testing.T) {
 	t.Parallel()
 
+	msgs := config.DefaultMessages()
+
 	cases := []struct {
 		name string
 		err  error
 		want string
 	}{
 		{name: "guard reason reaches the author", err: &comment.RejectedError{Reason: "слишком часто"}, want: "слишком часто"},
-		{name: "nothing staged", err: comment.ErrNothingStaged, want: msgErrNothing},
-		{name: "deleted parent comment", err: comment.ErrUnknownComment, want: msgErrUnknownComm},
-		{name: "banned", err: comment.ErrBanned, want: msgErrBanned},
-		{name: "wrapped sentinel", err: errors.Join(errors.New("ctx"), comment.ErrDraftExpired), want: msgErrDraftExpired},
-		{name: "no draft", err: comment.ErrNoDraft, want: msgErrNoDraft},
-		{name: "internal errors stay opaque", err: errors.New("pq: connection refused"), want: msgErrInternal},
+		{name: "nothing staged", err: comment.ErrNothingStaged, want: msgs.Errors.NothingStaged},
+		{name: "deleted parent comment", err: comment.ErrUnknownComment, want: msgs.Errors.UnknownComment},
+		{name: "banned", err: comment.ErrBanned, want: msgs.Errors.Banned},
+		{name: "wrapped sentinel", err: errors.Join(errors.New("ctx"), comment.ErrDraftExpired), want: msgs.Errors.DraftExpired},
+		{name: "no draft", err: comment.ErrNoDraft, want: msgs.Errors.NoDraft},
+		{name: "internal errors stay opaque", err: errors.New("pq: connection refused"), want: msgs.Errors.Internal},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, userMessage(tc.err))
+			assert.Equal(t, tc.want, userMessage(msgs, tc.err))
 		})
 	}
 }

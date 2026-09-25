@@ -118,13 +118,13 @@ func TestFormatBody(t *testing.T) {
 	t.Parallel()
 
 	nick := comment.Nickname{Label: "Лис"}
-	const link = "https://t.me/anon_bot?start=reply_7"
+	link := comment.ReplyLink{URL: "https://t.me/anon_bot?start=reply_7", Text: "ответить"}
 
 	cases := []struct {
 		name string
 		nick comment.Nickname
 		text string
-		link string
+		link comment.ReplyLink
 		want string
 	}{
 		{
@@ -157,6 +157,20 @@ func TestFormatBody(t *testing.T) {
 			name: "markup in the mask is escaped too",
 			nick: comment.Nickname{Label: "<i>Лис"}, text: "привет",
 			want: "<b>&lt;i&gt;Лис</b>\n\nпривет",
+		},
+		{
+			// The wording comes from config, so it is escaped like any other input.
+			name: "the link wording is configurable and escaped",
+			nick: nick, text: "привет",
+			link: comment.ReplyLink{URL: "https://t.me/b?start=reply_1", Text: "reply <here>"},
+			want: "<b>Лис</b>\n\nпривет\n\n" +
+				"<a href=\"https://t.me/b?start=reply_1\">reply &lt;here&gt;</a>",
+		},
+		{
+			name: "a blank wording drops the link rather than rendering an empty one",
+			nick: nick, text: "привет",
+			link: comment.ReplyLink{URL: "https://t.me/b?start=reply_1", Text: "  "},
+			want: "<b>Лис</b>\n\nпривет",
 		},
 	}
 

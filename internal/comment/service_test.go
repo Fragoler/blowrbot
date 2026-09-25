@@ -30,11 +30,12 @@ var (
 
 func testOptions() comment.Options {
 	return comment.Options{
-		BotUsername: "anon_bot",
-		ChannelID:   channelID,
-		Nicknames:   []comment.Nickname{fox, owl},
-		MaxTextLen:  10,
-		DraftTTL:    time.Hour,
+		BotUsername:   "anon_bot",
+		ReplyLinkText: "ответить",
+		ChannelID:     channelID,
+		Nicknames:     []comment.Nickname{fox, owl},
+		MaxTextLen:    10,
+		DraftTTL:      time.Hour,
 	}
 }
 
@@ -515,8 +516,9 @@ func TestDefaultsAreApplied(t *testing.T) {
 	// The mask list is required input; everything else must fall back to a default
 	// rather than rejecting every comment via a zero-length limit.
 	svc := comment.New(repo, pub, nil, comment.Options{
-		BotUsername: "anon_bot",
-		Nicknames:   []comment.Nickname{fox, owl},
+		BotUsername:   "anon_bot",
+		ReplyLinkText: "ответить",
+		Nicknames:     []comment.Nickname{fox, owl},
 	})
 	svc.SetClock(func() time.Time { return now })
 

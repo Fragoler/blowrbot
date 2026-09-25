@@ -27,10 +27,6 @@ chat_id = -1001111111111    # private moderators chat
 max_text_len = 3500
 draft_ttl = "1h"          # how long a "comment" tap stays valid
 
-# The bot's first comment under every post, the one carrying the button.
-# Leave empty for the built-in wording.
-invite_text = "Комментарии к этому посту анонимные. Нажмите кнопку ниже, выберите маску — и пишите."
-
 # The curated mask list. Editing it is a config change and a restart — no
 # migration. A label is stored on every comment published under it, so renaming
 # one here does not rewrite messages already in the channel. A label must fit
@@ -44,15 +40,41 @@ label = "Сова"
 [[nicknames]]
 label = "Ёж"
 
-
 [[nicknames]]
 label = "Кит"
-
 
 [[nicknames]]
 label = "Барсук"
 
-
 [[nicknames]]
 label = "Выдра"
 
+# Every line the bot shows a person. Each key is optional: leave one out and the
+# built-in Russian wording is used. An empty string is rejected at startup — it
+# would render as a blank button rather than fall back.
+[messages]
+button_comment = "💬 Комментировать анонимно"
+button_open_post = "Открыть пост"
+button_cancel = "Отмена"
+reply_link = "ответить"                # the link under every published comment
+
+invite = "Комментарии к этому посту анонимные. Нажмите кнопку ниже — и пишите."
+prompt = "Напишите комментарий к посту — текстом или медиа."
+reply_prompt = "Напишите ответ — текстом или медиа."
+choose_nickname = "Под каким псевдонимом отправить?"
+published = "Комментарий отправлен."
+cancelled = "Черновик удалён. Напишите новый комментарий."
+
+[messages.errors]
+banned = "Вы не можете оставлять комментарии."
+bad_payload = "Ссылка не распознана. Откройте её кнопкой под постом."
+unknown_post = "Пост не найден — возможно, он удалён."
+unknown_comment = "Комментарий не найден — возможно, он удалён."
+no_nicknames = "Список псевдонимов пуст, комментарии временно недоступны."
+draft_expired = "Время на комментарий истекло. Нажмите кнопку под постом ещё раз."
+nickname = "Этот псевдоним больше недоступен, выберите другой."
+empty = "Пустой комментарий: пришлите текст или медиа."
+too_long = "Комментарий слишком длинный, сократите текст."
+nothing_staged = "Нечего отправлять — сначала напишите комментарий."
+unsupported = "Такой тип вложения не поддерживается."
+internal = "Что-то пошло не так, попробуйте ещё раз позже."

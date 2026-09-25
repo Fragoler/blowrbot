@@ -68,11 +68,12 @@ func run(configPath string) error {
 
 	// Antiabuse is not wired yet, so the core runs with a permissive guard.
 	comments := comment.New(store, bot.Publisher(), comment.AllowAll{}, comment.Options{
-		BotUsername: cfg.Telegram.BotUsername,
-		ChannelID:   cfg.Telegram.ChannelID,
-		Nicknames:   nicknames(cfg),
-		MaxTextLen:  cfg.Comments.MaxTextLen,
-		DraftTTL:    ttl,
+		BotUsername:   cfg.Telegram.BotUsername,
+		ReplyLinkText: cfg.Messages.ReplyLink,
+		ChannelID:     cfg.Telegram.ChannelID,
+		Nicknames:     nicknames(cfg),
+		MaxTextLen:    cfg.Comments.MaxTextLen,
+		DraftTTL:      ttl,
 	})
 	bot.UseComments(comments)
 

@@ -44,6 +44,7 @@ type Config struct {
 	Postgres   Postgres   `toml:"postgres"`
 	Moderation Moderation `toml:"moderation"`
 	Comments   Comments   `toml:"comments"`
+	Messages   Messages   `toml:"messages"`
 	// Nicknames is the curated mask list. It lives here rather than in the
 	// database so that editing it is a config change and a restart, no migration.
 	Nicknames []Nickname `toml:"nicknames"`
@@ -92,9 +93,7 @@ type Comments struct {
 	// MaxTextLen caps the comment body before the nickname prefix is added.
 	MaxTextLen int `toml:"max_text_len"`
 	// DraftTTL bounds how long a deep-link tap stays valid, e.g. "1h" or "30m".
-	DraftTTL string `toml:"draft_ttl"`
-	// InviteText is the bot's first comment under every post; empty means the default.
-	InviteText     string `toml:"invite_text"`
+	DraftTTL       string `toml:"draft_ttl"`
 	AnswerLinkText string `toml:"answer_link_text"`
 }
 
@@ -158,6 +157,7 @@ func defaults() Config {
 			SSLMode:  "disable",
 			MaxConns: 10,
 		},
+		Messages: DefaultMessages(),
 		Comments: Comments{
 			MaxTextLen: 3500,
 			DraftTTL:   "1h",
@@ -224,6 +224,7 @@ func (c Config) Validate() error {
 	}
 
 	errs = append(errs, c.validateNicknames()...)
+	errs = append(errs, c.Messages.validate()...)
 
 	if _, err := parseLevel(c.Service.LogLevel); err != nil {
 		errs = append(errs, err)

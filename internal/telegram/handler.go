@@ -12,6 +12,7 @@ import (
 	"github.com/go-telegram/bot/models"
 
 	"loudbot/internal/comment"
+	"loudbot/internal/config"
 )
 
 const (
@@ -42,7 +43,7 @@ func (b *Bot) onChannelPost(ctx context.Context, post *models.Message) {
 
 	markup := models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{{
-			{Text: btnComment, URL: b.comments.DeepLink(post.ID)},
+			{Text: b.cfg.Messages.ButtonComment, URL: b.comments.DeepLink(post.ID)},
 		}},
 	}
 
@@ -117,7 +118,7 @@ func (b *Bot) onStart(ctx context.Context, msg *models.Message, payload string) 
 	userID := msg.From.ID
 
 	if payload == "" {
-		b.reply(ctx, msg.Chat.ID, msgHelp)
+		b.reply(ctx, msg.Chat.ID, b.cfg.Messages.Help)
 
 		return
 	}
@@ -131,14 +132,14 @@ func (b *Bot) onStart(ctx context.Context, msg *models.Message, payload string) 
 
 	params := &tgbot.SendMessageParams{
 		ChatID:    msg.Chat.ID,
-		Text:      startPrompt(started),
+		Text:      startPrompt(started, b.cfg.Messages),
 		ParseMode: models.ParseModeHTML,
 	}
 
 	if started.Link != "" {
 		params.ReplyMarkup = models.InlineKeyboardMarkup{
 			InlineKeyboard: [][]models.InlineKeyboardButton{{
-				{Text: btnOpen, URL: started.Link},
+				{Text: b.cfg.Messages.ButtonOpenPost, URL: started.Link},
 			}},
 		}
 	}
@@ -154,7 +155,7 @@ func (b *Bot) onComment(ctx context.Context, msg *models.Message) {
 
 	media, err := extractMedia(msg)
 	if err != nil {
-		b.reply(ctx, msg.Chat.ID, msgErrUnsupported)
+		b.reply(ctx, msg.Chat.ID, b.cfg.Messages.Errors.Unsupported)
 
 		return
 	}
@@ -182,8 +183,8 @@ func (b *Bot) onComment(ctx context.Context, msg *models.Message) {
 
 	prompt, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{
 		ChatID:      msg.Chat.ID,
-		Text:        msgChooseNickname,
-		ReplyMarkup: nicknameKeyboard(staged.Nicknames),
+		Text:        b.cfg.Messages.ChooseNickname,
+		ReplyMarkup: nicknameKeyboard(staged.Nicknames, b.cfg.Messages.ButtonCancel),
 	})
 	if err != nil {
 		b.log.Error("send nickname keyboard", slog.Int64("user_id", userID), slog.Any("error", err))
@@ -211,7 +212,7 @@ func (b *Bot) onCallback(ctx context.Context, query *models.CallbackQuery) {
 func (b *Bot) onNicknameChosen(ctx context.Context, query *models.CallbackQuery) {
 	label, err := comment.ParseNicknameCallback(query.Data)
 	if err != nil {
-		b.answer(ctx, query.ID, msgErrBadPayload)
+		b.answer(ctx, query.ID, b.cfg.Messages.Errors.BadPayload)
 
 		return
 	}
@@ -219,7 +220,7 @@ func (b *Bot) onNicknameChosen(ctx context.Context, query *models.CallbackQuery)
 	published, err := b.comments.Publish(ctx, query.From.ID, label)
 	if err != nil {
 		b.logCoreError("publish comment", query.From.ID, err)
-		b.answer(ctx, query.ID, userMessage(err))
+		b.answer(ctx, query.ID, userMessage(b.cfg.Messages, err))
 
 		return
 	}
@@ -230,11 +231,11 @@ func (b *Bot) onNicknameChosen(ctx context.Context, query *models.CallbackQuery)
 		slog.Int("message_id", published.MessageID),
 	)
 
-	b.answer(ctx, query.ID, msgPublished)
+	b.answer(ctx, query.ID, b.cfg.Messages.Published)
 
 	// The keyboard has done its job; turning it into the confirmation keeps the
 	// private chat from filling up with dead buttons.
-	b.replacePrompt(ctx, query, msgPublished)
+	b.replacePrompt(ctx, query, b.cfg.Messages.Published)
 }
 
 // onCancel drops the staged message, taking both it and the keyboard off screen.
@@ -242,12 +243,12 @@ func (b *Bot) onCancel(ctx context.Context, query *models.CallbackQuery) {
 	cancelled, err := b.comments.Cancel(ctx, query.From.ID)
 	if err != nil {
 		b.logCoreError("cancel comment", query.From.ID, err)
-		b.answer(ctx, query.ID, userMessage(err))
+		b.answer(ctx, query.ID, userMessage(b.cfg.Messages, err))
 
 		return
 	}
 
-	b.answer(ctx, query.ID, msgCancelled)
+	b.answer(ctx, query.ID, b.cfg.Messages.Cancelled)
 
 	b.deleteMessage(ctx, cancelled.ChatID, cancelled.UserMessageID)
 	b.deleteMessage(ctx, cancelled.ChatID, cancelled.PromptMessageID)
@@ -296,12 +297,12 @@ func startPayload(text string) (string, bool) {
 
 // startPrompt asks for the text, quoting whatever the author is answering — the
 // post, or the comment they opened through its "ответить" link.
-func startPrompt(started comment.StartResult) string {
+func startPrompt(started comment.StartResult, m config.Messages) string {
 	if started.IsReply() {
-		return promptText(started.ReplyTo.Nickname+": "+started.ReplyTo.Text, msgReplyPrompt)
+		return promptText(started.ReplyTo.Nickname+": "+started.ReplyTo.Text, m.ReplyPrompt)
 	}
 
-	return promptText(started.Post.Body, msgPrompt)
+	return promptText(started.Post.Body, m.Prompt)
 }
 
 // promptText puts a short quote of the source above the instruction.
@@ -323,7 +324,7 @@ func truncate(s string, limit int) string {
 }
 
 // nicknameKeyboard lays the masks out two per row, with cancel on its own row.
-func nicknameKeyboard(nicknames []comment.Nickname) models.InlineKeyboardMarkup {
+func nicknameKeyboard(nicknames []comment.Nickname, cancelLabel string) models.InlineKeyboardMarkup {
 	const perRow = 2
 
 	rows := make([][]models.InlineKeyboardButton, 0, len(nicknames)/perRow+2)
@@ -346,7 +347,7 @@ func nicknameKeyboard(nicknames []comment.Nickname) models.InlineKeyboardMarkup 
 	}
 
 	rows = append(rows, []models.InlineKeyboardButton{
-		{Text: btnCancel, CallbackData: comment.CancelCallback},
+		{Text: cancelLabel, CallbackData: comment.CancelCallback},
 	})
 
 	return models.InlineKeyboardMarkup{InlineKeyboard: rows}
@@ -408,7 +409,7 @@ func (b *Bot) reply(ctx context.Context, chatID int64, text string) {
 
 func (b *Bot) replyError(ctx context.Context, chatID int64, op string, userID int64, err error) {
 	b.logCoreError(op, userID, err)
-	b.reply(ctx, chatID, userMessage(err))
+	b.reply(ctx, chatID, userMessage(b.cfg.Messages, err))
 }
 
 func (b *Bot) logCoreError(op string, userID int64, err error) {

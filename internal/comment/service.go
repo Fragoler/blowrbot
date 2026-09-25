@@ -20,8 +20,10 @@ type Options struct {
 	// ChannelID is needed to build a /c/ link back to a post in a private channel.
 	ChannelID int64
 	// Nicknames is the mask list from config.toml, in the order it is offered.
-	Nicknames  []Nickname
-	MaxTextLen int
+	Nicknames []Nickname
+	// ReplyLinkText is the wording of the link under every published comment.
+	ReplyLinkText string
+	MaxTextLen    int
 	// DraftTTL bounds how long a deep-link tap stays valid, so that an old draft
 	// cannot silently attach a new message to a stale post.
 	DraftTTL time.Duration
@@ -304,8 +306,11 @@ func (s *Service) Publish(ctx context.Context, userID int64, label string) (Comm
 	published, err := s.pub.PublishComment(ctx, PublishRequest{
 		ChatID:           post.DiscussionChatID,
 		ReplyToMessageID: replyTo,
-		Text:             FormatBody(nickname, draft.Body, ReplyDeepLink(s.opts.BotUsername, id)),
-		Media:            draft.Media,
+		Text: FormatBody(nickname, draft.Body, ReplyLink{
+			URL:  ReplyDeepLink(s.opts.BotUsername, id),
+			Text: s.opts.ReplyLinkText,
+		}),
+		Media: draft.Media,
 	})
 	if err != nil {
 		if markErr := s.repo.MarkCommentFailed(ctx, id); markErr != nil {

@@ -3,33 +3,29 @@ package telegram
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	tgbot "github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 
 	"loudbot/internal/comment"
+	"loudbot/internal/config"
 )
 
 // Publisher sends approved comments into the discussion group. It implements
 // comment.Publisher and is the only place that knows how a comment looks in chat.
 type Publisher struct {
-	api        *tgbot.Bot
-	inviteText string
+	api      *tgbot.Bot
+	messages config.Messages
 }
 
-func NewPublisher(api *tgbot.Bot, inviteText string) *Publisher {
-	if strings.TrimSpace(inviteText) == "" {
-		inviteText = msgInvite
-	}
-
-	return &Publisher{api: api, inviteText: inviteText}
+func NewPublisher(api *tgbot.Bot, messages config.Messages) *Publisher {
+	return &Publisher{api: api, messages: messages}
 }
 
 // Publisher returns the bot's own publisher, so that main can wire the core
 // service after the client exists.
 func (b *Bot) Publisher() *Publisher {
-	return NewPublisher(b.api, b.cfg.Comments.InviteText)
+	return NewPublisher(b.api, b.cfg.Messages)
 }
 
 // PublishInvite leaves the bot's first comment under a fresh post: the thread
@@ -37,13 +33,13 @@ func (b *Bot) Publisher() *Publisher {
 func (p *Publisher) PublishInvite(ctx context.Context, req comment.InviteRequest) (comment.PublishResult, error) {
 	markup := models.InlineKeyboardMarkup{
 		InlineKeyboard: [][]models.InlineKeyboardButton{{
-			{Text: btnComment, URL: req.DeepLink},
+			{Text: p.messages.ButtonComment, URL: req.DeepLink},
 		}},
 	}
 
 	msg, err := p.api.SendMessage(ctx, &tgbot.SendMessageParams{
 		ChatID: req.ChatID,
-		Text:   p.inviteText,
+		Text:   p.messages.Invite,
 		ReplyParameters: &models.ReplyParameters{
 			ChatID:    req.ChatID,
 			MessageID: req.ReplyToMessageID,

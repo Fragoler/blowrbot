@@ -103,22 +103,31 @@ func ParseNicknameCallback(data string) (string, error) {
 	return raw, nil
 }
 
-// ReplyLinkText is the wording of the link that opens the bot to answer a comment.
-const ReplyLinkText = "ответить"
+// ReplyLink is the anchor appended to a published comment so readers can answer
+// it. Its wording comes from config; a zero value leaves the comment unlinked.
+type ReplyLink struct {
+	URL  string
+	Text string
+}
+
+func (l ReplyLink) empty() bool {
+	return l.URL == "" || strings.TrimSpace(l.Text) == ""
+}
 
 // FormatBody renders a comment for the discussion group: the mask in bold, a blank
-// line, the author's words, and a plain link that opens the bot to answer this
-// comment. The result is Telegram HTML, so every part written by a person is
-// escaped — a comment containing "<b>" must read as text, not as markup.
-func FormatBody(nickname Nickname, text, replyLink string) string {
+// line, the author's words, and the link that opens the bot to answer this comment.
+// The result is Telegram HTML, so every part written by a person is escaped — a
+// comment containing "<b>" must read as text, not as markup.
+func FormatBody(nickname Nickname, text string, reply ReplyLink) string {
 	parts := []string{"<b>" + html.EscapeString(strings.TrimSpace(nickname.Label)) + "</b>"}
 
 	if text = strings.TrimSpace(text); text != "" {
 		parts = append(parts, html.EscapeString(text))
 	}
 
-	if replyLink != "" {
-		parts = append(parts, `<a href="`+html.EscapeString(replyLink)+`">`+ReplyLinkText+`</a>`)
+	if !reply.empty() {
+		parts = append(parts,
+			`<a href="`+html.EscapeString(reply.URL)+`">`+html.EscapeString(reply.Text)+`</a>`)
 	}
 
 	return strings.Join(parts, "\n\n")
