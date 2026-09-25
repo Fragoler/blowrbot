@@ -12,6 +12,16 @@ import (
 	"unicode/utf8"
 )
 
+// Kind is what happened. A rule reacts to one kind, or to both.
+type Kind string
+
+const (
+	KindComment Kind = "comment"
+	KindPost    Kind = "post"
+	// KindAny is only ever written on a rule, never on an event.
+	KindAny Kind = "any"
+)
+
 // Counters are a person's totals at the moment a rule is checked. They already
 // include the comment that triggered the check, so a "ten comments" rule fires on
 // the tenth rather than the eleventh.
@@ -22,10 +32,14 @@ type Counters struct {
 	Achievements int
 }
 
-// Event is one published comment, offered to every rule.
+// Event is something a person just did — a comment published, or a suggested
+// post approved — offered to every rule that reacts to its kind.
 type Event struct {
+	Kind   Kind
 	UserID int64
-	Text   string
+	// Text is the comment's body, or the suggested post's, so the text conditions
+	// read whatever the event is actually about.
+	Text string
 	// At is the publication time, already in the configured timezone.
 	At       time.Time
 	IsReply  bool
@@ -35,7 +49,9 @@ type Event struct {
 // Rule is one row of achievement_rules. A nil condition is not checked; the ones
 // that are set must all hold, so a rule reads as "and" down its filled columns.
 type Rule struct {
-	ID                     int64
+	ID int64
+	// Event is the kind this rule reacts to: comment, post, or any.
+	Event                  Kind
 	AchievementID          int64
 	AchievementCode        string
 	AchievementTitle       string
@@ -58,6 +74,10 @@ type Rule struct {
 // Matches reports whether the event satisfies every condition the rule sets.
 // pattern is the rule's compiled regexp, or nil when it has none.
 func (r Rule) Matches(e Event, pattern *regexp.Regexp) bool {
+	if !r.reactsTo(e.Kind) {
+		return false
+	}
+
 	text := strings.TrimSpace(e.Text)
 	length := utf8.RuneCountInString(text)
 
@@ -98,6 +118,20 @@ func (r Rule) Matches(e Event, pattern *regexp.Regexp) bool {
 		return false
 	}
 	return true
+}
+
+// reactsTo reports whether the rule cares about this kind of event. An empty
+// Event on a rule means "comment", which is what every rule written before
+// suggested posts existed meant.
+func (r Rule) reactsTo(kind Kind) bool {
+	switch r.Event {
+	case KindAny:
+		return true
+	case "":
+		return kind == KindComment
+	default:
+		return r.Event == kind
+	}
 }
 
 // withinHours checks the half-open window [AfterHour, BeforeHour). A window whose

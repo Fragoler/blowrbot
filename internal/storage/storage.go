@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -15,6 +16,7 @@ import (
 	"loudbot/internal/comment"
 	"loudbot/internal/config"
 	"loudbot/internal/profile"
+	"loudbot/internal/suggestion"
 )
 
 type Storage struct {
@@ -465,7 +467,7 @@ WHERE user_id = $1 AND status = $2`
 // comment, so a rule edited in the database takes effect without a restart.
 func (s *Storage) ActiveRules(ctx context.Context) ([]achievement.Rule, error) {
 	const q = `
-SELECT r.id, r.achievement_id, a.code, a.title, a.description,
+SELECT r.id, r.event, r.achievement_id, a.code, a.title, a.description,
        r.after_hour, r.before_hour,
        r.min_length, r.max_length, r.upper_only, COALESCE(r.pattern, ''),
        r.min_comments, r.min_replies, r.min_posts, r.min_achievements
@@ -484,7 +486,7 @@ ORDER BY r.id`
 	for rows.Next() {
 		var r achievement.Rule
 		err := rows.Scan(
-			&r.ID, &r.AchievementID, &r.AchievementCode, &r.AchievementTitle, &r.AchievementDescription,
+			&r.ID, &r.Event, &r.AchievementID, &r.AchievementCode, &r.AchievementTitle, &r.AchievementDescription,
 			&r.AfterHour, &r.BeforeHour,
 			&r.MinLength, &r.MaxLength, &r.UpperOnly, &r.Pattern,
 			&r.MinComments, &r.MinReplies, &r.MinPosts, &r.MinAchievements,
@@ -534,4 +536,72 @@ ON CONFLICT DO NOTHING`
 	}
 
 	return tag.RowsAffected() > 0, nil
+}
+
+// CreateSuggestion records a post offered through Direct Messages.
+func (s *Storage) CreateSuggestion(ctx context.Context, sug suggestion.Suggestion) (int64, error) {
+	media, err := json.Marshal(nonNilMedia(sug.Media))
+	if err != nil {
+		return 0, fmt.Errorf("encode suggestion media: %w", err)
+	}
+
+	const q = `
+INSERT INTO suggested_posts (user_id, content_text, media_json, status, created_at, dm_chat_id, dm_message_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id`
+
+	var id int64
+	err = s.pool.QueryRow(ctx, q,
+		sug.UserID, sug.Text, media, sug.Status, sug.CreatedAt, sug.DMChatID, sug.DMMessageID,
+	).Scan(&id)
+	if err != nil {
+		return 0, fmt.Errorf("create suggestion: %w", err)
+	}
+
+	return id, nil
+}
+
+// SuggestionByMessage finds a suggestion by the Direct Messages message it was
+// offered in, which is all a decision's service message carries.
+func (s *Storage) SuggestionByMessage(ctx context.Context, chatID int64, messageID int) (suggestion.Suggestion, error) {
+	const q = `
+SELECT id, user_id, content_text, media_json, status,
+       COALESCE(dm_chat_id, 0), COALESCE(dm_message_id, 0), created_at
+FROM suggested_posts
+WHERE dm_chat_id = $1 AND dm_message_id = $2`
+
+	var (
+		sug   suggestion.Suggestion
+		media []byte
+	)
+
+	err := s.pool.QueryRow(ctx, q, chatID, messageID).
+		Scan(&sug.ID, &sug.UserID, &sug.Text, &media, &sug.Status,
+			&sug.DMChatID, &sug.DMMessageID, &sug.CreatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return suggestion.Suggestion{}, suggestion.ErrNotFound
+		}
+
+		return suggestion.Suggestion{}, fmt.Errorf("find suggestion: %w", err)
+	}
+
+	if err := json.Unmarshal(media, &sug.Media); err != nil {
+		return suggestion.Suggestion{}, fmt.Errorf("decode suggestion media: %w", err)
+	}
+
+	return sug, nil
+}
+
+// SetSuggestionStatus records what an admin decided.
+func (s *Storage) SetSuggestionStatus(
+	ctx context.Context, id int64, status suggestion.Status, decidedAt time.Time,
+) error {
+	const q = `UPDATE suggested_posts SET status = $2, decided_at = $3 WHERE id = $1`
+
+	if _, err := s.pool.Exec(ctx, q, id, status, decidedAt); err != nil {
+		return fmt.Errorf("set suggestion %d status: %w", id, err)
+	}
+
+	return nil
 }

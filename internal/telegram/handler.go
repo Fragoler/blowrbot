@@ -6,6 +6,7 @@ import (
 	"html"
 	"log/slog"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	tgbot "github.com/go-telegram/bot"
@@ -15,6 +16,7 @@ import (
 	"loudbot/internal/comment"
 	"loudbot/internal/config"
 	"loudbot/internal/profile"
+	"loudbot/internal/suggestion"
 )
 
 const (
@@ -31,6 +33,8 @@ func (b *Bot) handleUpdate(ctx context.Context, _ *tgbot.Bot, update *models.Upd
 		b.onChannelPost(ctx, update.ChannelPost)
 	case update.CallbackQuery != nil:
 		b.onCallback(ctx, update.CallbackQuery)
+	case update.Message != nil && update.Message.Chat.IsDirectMessages:
+		b.onDirectMessage(ctx, update.Message)
 	case update.Message != nil && update.Message.IsAutomaticForward:
 		b.onDiscussionForward(ctx, update.Message)
 	case update.Message != nil && update.Message.Chat.Type == models.ChatTypePrivate:
@@ -99,6 +103,109 @@ func (b *Bot) onDiscussionForward(ctx context.Context, msg *models.Message) {
 		slog.Int("post_id", post.ChannelMessageID),
 		slog.Int("thread_message_id", post.DiscussionMessageID),
 	)
+}
+
+// onDirectMessage handles the channel's Direct Messages chat: a reader offering
+// a post, and the service messages Telegram sends once an admin decides. The bot
+// never approves anything itself — that happens in Telegram's own interface.
+func (b *Bot) onDirectMessage(ctx context.Context, msg *models.Message) {
+	switch {
+	case msg.SuggestedPostApproved != nil:
+		b.onSuggestionDecided(ctx, msg.SuggestedPostApproved.SuggestedPostMessage, suggestion.StatusApproved)
+	case msg.SuggestedPostDeclined != nil:
+		b.onSuggestionDecided(ctx, msg.SuggestedPostDeclined.SuggestedPostMessage, suggestion.StatusDeclined)
+	case msg.SuggestedPostApprovalFailed != nil:
+		b.onSuggestionDecided(ctx, msg.SuggestedPostApprovalFailed.SuggestedPostMessage, suggestion.StatusFailed)
+	case msg.SuggestedPostInfo != nil:
+		b.onSuggestionOffered(ctx, msg)
+	}
+}
+
+// onSuggestionOffered records a freshly offered post.
+func (b *Bot) onSuggestionOffered(ctx context.Context, msg *models.Message) {
+	author := suggestionAuthor(msg)
+	if author == 0 {
+		b.log.Debug("suggested post without an author", slog.Int("message_id", msg.ID))
+
+		return
+	}
+
+	media, err := extractMedia(msg)
+	if err != nil {
+		media = nil
+	}
+
+	sug, err := b.suggestions.Offered(ctx, suggestion.Suggestion{
+		UserID:      author,
+		Text:        messageBody(msg),
+		Media:       media,
+		DMChatID:    msg.Chat.ID,
+		DMMessageID: msg.ID,
+	})
+	if err != nil {
+		b.log.Error("record suggested post",
+			slog.Int64("user_id", author),
+			slog.Int("message_id", msg.ID),
+			slog.Any("error", err),
+		)
+
+		return
+	}
+
+	b.log.Info("suggested post recorded",
+		slog.Int64("suggestion_id", sug.ID),
+		slog.Int64("user_id", author),
+	)
+}
+
+// onSuggestionDecided records an admin's decision and, for an approval, checks
+// what it earned. Telegram redelivers service messages, so only the call that
+// actually moves the row hands anything out.
+func (b *Bot) onSuggestionDecided(ctx context.Context, offered *models.Message, status suggestion.Status) {
+	if offered == nil {
+		return
+	}
+
+	sug, approved, err := b.suggestions.Decided(ctx, offered.Chat.ID, offered.ID, status)
+	if err != nil {
+		b.log.Error("record suggestion decision",
+			slog.Int("message_id", offered.ID),
+			slog.String("status", string(status)),
+			slog.Any("error", err),
+		)
+
+		return
+	}
+
+	b.log.Info("suggestion decided",
+		slog.Int64("suggestion_id", sug.ID),
+		slog.String("status", string(status)),
+	)
+
+	if !approved {
+		return
+	}
+
+	b.award(ctx, achievement.Event{
+		Kind:   achievement.KindPost,
+		UserID: sug.UserID,
+		Text:   sug.Text,
+		At:     time.Now(),
+	})
+}
+
+// suggestionAuthor is the reader who offered the post. In a Direct Messages
+// topic the message's From is the channel, so the author lives on the topic.
+func suggestionAuthor(msg *models.Message) int64 {
+	if msg.DirectMessagesTopic != nil && msg.DirectMessagesTopic.User != nil {
+		return msg.DirectMessagesTopic.User.ID
+	}
+
+	if msg.From != nil {
+		return msg.From.ID
+	}
+
+	return 0
 }
 
 func (b *Bot) onPrivateMessage(ctx context.Context, msg *models.Message) {
@@ -352,30 +459,31 @@ func (b *Bot) onNicknameChosen(ctx context.Context, query *models.CallbackQuery)
 	// private chat from filling up with dead buttons.
 	b.replacePrompt(ctx, query, b.cfg.Messages.Published)
 
-	b.award(ctx, published)
-}
-
-// award is the one place a published comment is checked for achievements; every
-// trigger lives in internal/achievement, none of it here.
-func (b *Bot) award(ctx context.Context, published comment.Comment) {
-	granted, err := b.awards.Award(ctx, achievement.Event{
+	b.award(ctx, achievement.Event{
+		Kind:    achievement.KindComment,
 		UserID:  published.UserID,
 		Text:    published.Text,
 		At:      published.CreatedAt,
 		IsReply: published.ReplyToCommentID != 0,
 	})
+}
+
+// award hands one event to the achievements layer and tells the author what it
+// earned. Every trigger lives in internal/achievement; none of it here.
+func (b *Bot) award(ctx context.Context, event achievement.Event) {
+	granted, err := b.awards.Award(ctx, event)
 	if err != nil {
-		// The comment is already in the channel; a failure here must not look
-		// like the comment failed.
+		// Whatever earned this is already public; a failure here must not look
+		// like that failed.
 		b.log.Error("award achievements",
-			slog.Int64("user_id", published.UserID),
-			slog.Int64("comment_id", published.ID),
+			slog.Int64("user_id", event.UserID),
+			slog.String("kind", string(event.Kind)),
 			slog.Any("error", err),
 		)
 	}
 
 	for _, a := range granted {
-		b.replyHTML(ctx, published.UserID, achievementText(b.cfg.Messages.Achievement, a))
+		b.replyHTML(ctx, event.UserID, achievementText(b.cfg.Messages.Achievement, a))
 	}
 }
 

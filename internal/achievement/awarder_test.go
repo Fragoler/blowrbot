@@ -63,7 +63,7 @@ func newAwarder(repo *fakeRepo, loc *time.Location) *achievement.Awarder {
 }
 
 func event() achievement.Event {
-	return achievement.Event{UserID: userID, Text: "привет", At: at(12)}
+	return achievement.Event{Kind: achievement.KindComment, UserID: userID, Text: "привет", At: at(12)}
 }
 
 func TestAwardGrantsAMatchingRule(t *testing.T) {
@@ -238,4 +238,44 @@ func TestAwardCompilesAPatternOnce(t *testing.T) {
 
 	assert.Len(t, repo.grants, 3, "the rule is checked every time")
 	assert.Len(t, repo.held, 1, "but the achievement is handed out once")
+}
+
+func TestAwardSeparatesPostsFromComments(t *testing.T) {
+	t.Parallel()
+
+	repo := newRepo(
+		achievement.Rule{ID: 1, Event: achievement.KindComment, AchievementID: 10, MinLength: ptr(1)},
+		achievement.Rule{ID: 2, Event: achievement.KindPost, AchievementID: 20, MinLength: ptr(1)},
+		achievement.Rule{ID: 3, Event: achievement.KindAny, AchievementID: 30, MinLength: ptr(1)},
+	)
+	awarder := newAwarder(repo, time.UTC)
+
+	post := event()
+	post.Kind = achievement.KindPost
+
+	granted, err := awarder.Award(context.Background(), post)
+	require.NoError(t, err)
+
+	assert.Equal(t, []int64{20, 30}, repo.grants, "a comment-only rule stays out of a post's way")
+	assert.Len(t, granted, 2)
+}
+
+func TestAwardOnAnApprovedPostCountsPosts(t *testing.T) {
+	t.Parallel()
+
+	// A "five approved posts" rule has to fire on the approval itself, which is
+	// the whole reason a rule carries an event kind.
+	repo := newRepo(achievement.Rule{
+		ID: 1, Event: achievement.KindPost, AchievementID: 10,
+		AchievementTitle: "Автор", MinPosts: ptr(5),
+	})
+	repo.counters = achievement.Counters{Posts: 5}
+
+	post := event()
+	post.Kind = achievement.KindPost
+
+	granted, err := newAwarder(repo, time.UTC).Award(context.Background(), post)
+	require.NoError(t, err)
+	require.Len(t, granted, 1)
+	assert.Equal(t, "Автор", granted[0].Title)
 }

@@ -42,7 +42,7 @@ func TestMatchesHourWindow(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			got := tc.rule.Matches(achievement.Event{Text: "x", At: at(tc.hour)}, nil)
+			got := tc.rule.Matches(achievement.Event{Kind: achievement.KindComment, Text: "x", At: at(tc.hour)}, nil)
 			assert.Equal(t, tc.want, got)
 		})
 	}
@@ -52,7 +52,7 @@ func TestMatchesNoHourWindow(t *testing.T) {
 	t.Parallel()
 
 	rule := achievement.Rule{MinLength: ptr(1)}
-	assert.True(t, rule.Matches(achievement.Event{Text: "x", At: at(3)}, nil))
+	assert.True(t, rule.Matches(achievement.Event{Kind: achievement.KindComment, Text: "x", At: at(3)}, nil))
 }
 
 func TestMatchesLength(t *testing.T) {
@@ -88,7 +88,7 @@ func TestMatchesLength(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, tc.rule.Matches(achievement.Event{Text: tc.text, At: at(12)}, nil))
+			assert.Equal(t, tc.want, tc.rule.Matches(achievement.Event{Kind: achievement.KindComment, Text: tc.text, At: at(12)}, nil))
 		})
 	}
 }
@@ -118,7 +118,7 @@ func TestMatchesUpperOnly(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			assert.Equal(t, tc.want, tc.rule.Matches(achievement.Event{Text: tc.text, At: at(12)}, nil))
+			assert.Equal(t, tc.want, tc.rule.Matches(achievement.Event{Kind: achievement.KindComment, Text: tc.text, At: at(12)}, nil))
 		})
 	}
 }
@@ -129,11 +129,11 @@ func TestMatchesPattern(t *testing.T) {
 	rule := achievement.Rule{Pattern: `(?i)котик`}
 	re := regexp.MustCompile(rule.Pattern)
 
-	assert.True(t, rule.Matches(achievement.Event{Text: "какой КОТИК", At: at(12)}, re))
-	assert.False(t, rule.Matches(achievement.Event{Text: "какой пёсик", At: at(12)}, re))
+	assert.True(t, rule.Matches(achievement.Event{Kind: achievement.KindComment, Text: "какой КОТИК", At: at(12)}, re))
+	assert.False(t, rule.Matches(achievement.Event{Kind: achievement.KindComment, Text: "какой пёсик", At: at(12)}, re))
 
 	// A rule with no pattern is not filtered by one.
-	assert.True(t, achievement.Rule{MinLength: ptr(1)}.Matches(achievement.Event{Text: "x", At: at(12)}, nil))
+	assert.True(t, achievement.Rule{MinLength: ptr(1)}.Matches(achievement.Event{Kind: achievement.KindComment, Text: "x", At: at(12)}, nil))
 }
 
 func TestMatchesCounters(t *testing.T) {
@@ -160,7 +160,7 @@ func TestMatchesCounters(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
-			event := achievement.Event{Text: "x", At: at(12), Counters: counters}
+			event := achievement.Event{Kind: achievement.KindComment, Text: "x", At: at(12), Counters: counters}
 			assert.Equal(t, tc.want, tc.rule.Matches(event, nil))
 		})
 	}
@@ -172,9 +172,59 @@ func TestMatchesRequiresEveryConditionSet(t *testing.T) {
 	// Conditions are "and": the night window holds, the length does not.
 	rule := achievement.Rule{AfterHour: ptr(23), BeforeHour: ptr(5), MinLength: ptr(100)}
 
-	event := achievement.Event{Text: "коротко", At: at(3)}
+	event := achievement.Event{Kind: achievement.KindComment, Text: "коротко", At: at(3)}
 	assert.False(t, rule.Matches(event, nil))
 
 	rule.MinLength = ptr(3)
 	assert.True(t, rule.Matches(event, nil))
+}
+
+func TestMatchesEventKind(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		rule achievement.Kind
+		got  achievement.Kind
+		want bool
+	}{
+		{name: "comment rule on a comment", rule: achievement.KindComment, got: achievement.KindComment, want: true},
+		{name: "comment rule ignores a post", rule: achievement.KindComment, got: achievement.KindPost, want: false},
+		{name: "post rule on a post", rule: achievement.KindPost, got: achievement.KindPost, want: true},
+		{name: "post rule ignores a comment", rule: achievement.KindPost, got: achievement.KindComment, want: false},
+		{name: "any takes a comment", rule: achievement.KindAny, got: achievement.KindComment, want: true},
+		{name: "any takes a post", rule: achievement.KindAny, got: achievement.KindPost, want: true},
+		{
+			// Rules written before suggested posts existed carry no kind and were
+			// always about comments.
+			name: "an unset kind means comment", rule: "", got: achievement.KindComment, want: true,
+		},
+		{name: "an unset kind ignores a post", rule: "", got: achievement.KindPost, want: false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			rule := achievement.Rule{Event: tc.rule, MinLength: ptr(1)}
+			event := achievement.Event{Kind: tc.got, Text: "привет", At: at(12)}
+
+			assert.Equal(t, tc.want, rule.Matches(event, nil))
+		})
+	}
+}
+
+func TestMatchesReadsThePostText(t *testing.T) {
+	t.Parallel()
+
+	// The text conditions read whatever the event is about, so a pattern rule on
+	// posts inspects the suggested post rather than a comment.
+	rule := achievement.Rule{Event: achievement.KindPost, Pattern: `(?i)котик`}
+	re := regexp.MustCompile(rule.Pattern)
+
+	post := achievement.Event{Kind: achievement.KindPost, Text: "смотрите какой котик", At: at(12)}
+	assert.True(t, rule.Matches(post, re))
+
+	comment := achievement.Event{Kind: achievement.KindComment, Text: "смотрите какой котик", At: at(12)}
+	assert.False(t, rule.Matches(comment, re), "the same text on a comment is not this rule's business")
 }

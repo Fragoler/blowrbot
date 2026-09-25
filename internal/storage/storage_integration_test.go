@@ -24,6 +24,7 @@ import (
 	"loudbot/internal/config"
 	"loudbot/internal/profile"
 	"loudbot/internal/storage"
+	"loudbot/internal/suggestion"
 )
 
 // envDSN points at a throwaway database; everything in it is dropped and rebuilt.
@@ -127,7 +128,7 @@ func restoreSeed(ctx context.Context, t *testing.T, conn *pgx.Conn) {
 const reset = `
 TRUNCATE posts, comment_drafts, comments, suggested_posts, reports, identity_map,
          audit_log, users, private_messages, user_achievements, achievement_nicknames,
-         achievement_rules, achievements
+         achievement_rules, achievements, suggested_posts
 RESTART IDENTITY CASCADE`
 
 // Masks live in the nicknames table, seeded by the migration.
@@ -715,4 +716,89 @@ func TestRuleWithNoConditionIsRefused(t *testing.T) {
 		`INSERT INTO achievement_rules (achievement_id, after_hour) VALUES ($1, 23)`, achievementID)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "achievement_rules_hours_paired")
+}
+
+func TestSuggestionLifecycle(t *testing.T) {
+	st, ctx := open(t)
+
+	const (
+		user      = int64(10_015)
+		dmChat    = int64(-100_777)
+		messageID = 55
+	)
+
+	_, err := st.EnsureUser(ctx, user)
+	require.NoError(t, err)
+
+	_, err = st.SuggestionByMessage(ctx, dmChat, messageID)
+	require.ErrorIs(t, err, suggestion.ErrNotFound)
+
+	created := time.Now().UTC().Truncate(time.Millisecond)
+	id, err := st.CreateSuggestion(ctx, suggestion.Suggestion{
+		UserID:      user,
+		Text:        "предлагаю пост",
+		Media:       []comment.Media{{Type: comment.MediaPhoto, FileID: "f1", FileUniqueID: "u1"}},
+		Status:      suggestion.StatusPending,
+		DMChatID:    dmChat,
+		DMMessageID: messageID,
+		CreatedAt:   created,
+	})
+	require.NoError(t, err)
+	require.NotZero(t, id)
+
+	// A decision's service message carries the original message, not our id.
+	got, err := st.SuggestionByMessage(ctx, dmChat, messageID)
+	require.NoError(t, err)
+	assert.Equal(t, id, got.ID)
+	assert.Equal(t, user, got.UserID)
+	assert.Equal(t, "предлагаю пост", got.Text)
+	assert.Equal(t, suggestion.StatusPending, got.Status)
+	require.Len(t, got.Media, 1)
+	assert.Equal(t, "f1", got.Media[0].FileID)
+	assert.WithinDuration(t, created, got.CreatedAt, time.Millisecond)
+
+	// A pending suggestion is not an approved post.
+	counters, err := st.Counters(ctx, user)
+	require.NoError(t, err)
+	assert.Zero(t, counters.Posts)
+
+	require.NoError(t, st.SetSuggestionStatus(ctx, id, suggestion.StatusApproved, time.Now().UTC()))
+
+	got, err = st.SuggestionByMessage(ctx, dmChat, messageID)
+	require.NoError(t, err)
+	assert.Equal(t, suggestion.StatusApproved, got.Status)
+
+	counters, err = st.Counters(ctx, user)
+	require.NoError(t, err)
+	assert.Equal(t, 1, counters.Posts, "an approved suggestion is what a post rule counts")
+}
+
+func TestRuleEventColumn(t *testing.T) {
+	st, ctx := open(t)
+
+	conn := probe(ctx, t)
+
+	var achievementID int64
+	require.NoError(t, conn.QueryRow(ctx,
+		`INSERT INTO achievements (code, title) VALUES ('author', 'Автор') RETURNING id`).Scan(&achievementID))
+
+	// A rule written before suggested posts existed gets the comment default.
+	_, err := conn.Exec(ctx,
+		`INSERT INTO achievement_rules (achievement_id, min_length) VALUES ($1, 10)`, achievementID)
+	require.NoError(t, err)
+
+	_, err = conn.Exec(ctx,
+		`INSERT INTO achievement_rules (achievement_id, event, min_posts) VALUES ($1, 'post', 5)`, achievementID)
+	require.NoError(t, err)
+
+	rules, err := st.ActiveRules(ctx)
+	require.NoError(t, err)
+	require.Len(t, rules, 2)
+	assert.Equal(t, achievement.KindComment, rules[0].Event, "the default keeps old rules about comments")
+	assert.Equal(t, achievement.KindPost, rules[1].Event)
+
+	_, err = conn.Exec(ctx,
+		`INSERT INTO achievement_rules (achievement_id, event, min_length) VALUES ($1, 'telepathy', 1)`,
+		achievementID)
+	require.Error(t, err, "the schema refuses a kind the bot cannot produce")
 }

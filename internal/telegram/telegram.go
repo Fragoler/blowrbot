@@ -15,17 +15,19 @@ import (
 	"loudbot/internal/comment"
 	"loudbot/internal/config"
 	"loudbot/internal/profile"
+	"loudbot/internal/suggestion"
 )
 
 // Bot wires the Telegram client to the comment core.
 type Bot struct {
-	api      *tgbot.Bot
-	cfg      config.Config
-	log      *slog.Logger
-	comments *comment.Service
-	profiles *profile.Service
-	awards   *achievement.Awarder
-	history  *chatlog.Log
+	api         *tgbot.Bot
+	cfg         config.Config
+	log         *slog.Logger
+	comments    *comment.Service
+	profiles    *profile.Service
+	awards      *achievement.Awarder
+	suggestions *suggestion.Service
+	history     *chatlog.Log
 }
 
 // deleter adapts the Telegram client to chatlog.Deleter.
@@ -92,6 +94,11 @@ func (b *Bot) UseAwarder(a *achievement.Awarder) {
 	b.awards = a
 }
 
+// UseSuggestions attaches the recorder of posts offered through Direct Messages.
+func (b *Bot) UseSuggestions(svc *suggestion.Service) {
+	b.suggestions = svc
+}
+
 // Run starts long polling and blocks until the context is cancelled.
 func (b *Bot) Run(ctx context.Context) error {
 	if b.comments == nil {
@@ -104,6 +111,10 @@ func (b *Bot) Run(ctx context.Context) error {
 
 	if b.awards == nil {
 		return errors.New("awarder is not attached")
+	}
+
+	if b.suggestions == nil {
+		return errors.New("suggestion service is not attached")
 	}
 
 	me, err := b.api.GetMe(ctx)

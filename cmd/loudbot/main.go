@@ -14,6 +14,7 @@ import (
 	"loudbot/internal/config"
 	"loudbot/internal/profile"
 	"loudbot/internal/storage"
+	"loudbot/internal/suggestion"
 	"loudbot/internal/telegram"
 )
 
@@ -84,6 +85,7 @@ func run(configPath string) error {
 		return fmt.Errorf("config: %w", err)
 	}
 	bot.UseAwarder(achievement.New(store, location, log))
+	bot.UseSuggestions(suggestion.New(store))
 
 	return bot.Run(ctx)
 }
