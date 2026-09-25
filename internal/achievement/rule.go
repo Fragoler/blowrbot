@@ -35,10 +35,11 @@ type Event struct {
 // Rule is one row of achievement_rules. A nil condition is not checked; the ones
 // that are set must all hold, so a rule reads as "and" down its filled columns.
 type Rule struct {
-	ID               int64
-	AchievementID    int64
-	AchievementCode  string
-	AchievementTitle string
+	ID                     int64
+	AchievementID          int64
+	AchievementCode        string
+	AchievementTitle       string
+	AchievementDescription string
 
 	AfterHour  *int
 	BeforeHour *int
@@ -77,7 +78,7 @@ func (r Rule) Matches(e Event, pattern *regexp.Regexp) bool {
 		return false
 	}
 	if pattern != nil && !pattern.MatchString(text) {
-		slog.Debug("rule miss: pattern", "rule_id", r.ID, "text", text)
+		slog.Debug("rule miss: pattern", "rule_id", r.ID, "pattern", r.Pattern, "text", text)
 		return false
 	}
 	if r.MinComments != nil && e.Counters.Comments < *r.MinComments {

@@ -10,8 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"loudbot/internal/achievement"
 	"loudbot/internal/comment"
 	"loudbot/internal/config"
+	"loudbot/internal/profile"
 )
 
 func TestStartPayload(t *testing.T) {
@@ -227,4 +229,78 @@ func TestExpected(t *testing.T) {
 	assert.True(t, expected(comment.ErrUnknownComment))
 	assert.True(t, expected(&comment.RejectedError{Reason: "стоп-слово"}))
 	assert.False(t, expected(errors.New("boom")), "a real failure must still be logged as an error")
+}
+
+func TestProfileText(t *testing.T) {
+	t.Parallel()
+
+	m := config.DefaultMessages().Profile
+
+	got := profileText(profile.Profile{
+		Activity: profile.Activity{Comments: 12, Replies: 4},
+		Achievements: []profile.Achievement{
+			{Title: "Полуночник", Description: "Длинный комментарий ночью"},
+			{Title: "Крикун"},
+		},
+		Nicknames: []comment.Nickname{{Label: "Лис"}, {Label: "Сова"}},
+	}, m)
+
+	assert.Contains(t, got, "<b>📊 Ваша статистика</b>")
+	assert.Contains(t, got, "💬 Комментариев: 12")
+	assert.Contains(t, got, "↩️ Ответов: 4")
+	assert.Contains(t, got, "<b>🏅 Достижения (2)</b>", "a heading says how long its list is")
+	assert.Contains(t, got, "• <b>Полуночник</b>")
+	assert.Contains(t, got, "<i>Длинный комментарий ночью</i>")
+	assert.Contains(t, got, "• <b>Крикун</b>")
+	assert.NotContains(t, got, "Крикун</b>\n   <i>", "an achievement with no description gets no empty line")
+	assert.Contains(t, got, "<b>🎭 Доступные псевдонимы (2)</b>")
+	assert.Contains(t, got, "• Лис")
+	assert.False(t, strings.HasSuffix(got, "\n"), "no trailing blank line")
+}
+
+func TestProfileTextWithNothingEarned(t *testing.T) {
+	t.Parallel()
+
+	m := config.DefaultMessages().Profile
+
+	got := profileText(profile.Profile{Nicknames: []comment.Nickname{{Label: "Лис"}}}, m)
+
+	assert.Contains(t, got, "<b>🏅 Достижения</b>", "an empty list drops the count")
+	assert.NotContains(t, got, "Достижения (0)")
+	assert.Contains(t, got, "<i>"+m.NoAchievements+"</i>")
+}
+
+func TestProfileTextEscapesWhatItDidNotWrite(t *testing.T) {
+	t.Parallel()
+
+	// Titles and masks come from the database; raw markup there must not reach
+	// Telegram as markup, or the whole message fails to parse.
+	got := profileText(profile.Profile{
+		Achievements: []profile.Achievement{{Title: "<b>взлом", Description: "a & b"}},
+		Nicknames:    []comment.Nickname{{Label: "<i>Лис"}},
+	}, config.DefaultMessages().Profile)
+
+	assert.Contains(t, got, "&lt;b&gt;взлом")
+	assert.Contains(t, got, "a &amp; b")
+	assert.Contains(t, got, "&lt;i&gt;Лис")
+}
+
+func TestAchievementText(t *testing.T) {
+	t.Parallel()
+
+	head := config.DefaultMessages().Achievement
+
+	withDescription := achievementText(head, achievement.Granted{
+		Title:       "Полуночник",
+		Description: "Длинный комментарий ночью",
+	})
+	assert.Equal(t,
+		"<b>🏅 Новое достижение</b>\n\n<b>Полуночник</b>\n<i>Длинный комментарий ночью</i>",
+		withDescription)
+
+	bare := achievementText(head, achievement.Granted{Title: "Крикун"})
+	assert.Equal(t, "<b>🏅 Новое достижение</b>\n\n<b>Крикун</b>", bare)
+
+	escaped := achievementText(head, achievement.Granted{Title: "<b>взлом"})
+	assert.Contains(t, escaped, "&lt;b&gt;взлом")
 }

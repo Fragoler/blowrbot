@@ -35,22 +35,25 @@ draft_ttl = "1h"          # how long a "comment" tap stays valid
 button_comment = "💬 Комментировать анонимно"
 button_open_post = "Открыть пост"
 button_cancel = "Отмена"
-reply_link = "ответить"                # the link under every published comment
+reply_link = "Ответить"                # the link under every published comment
 
-invite = "Комментарии к этому посту анонимные. Нажмите кнопку ниже — и пишите."
-prompt = "Напишите комментарий к посту — текстом или медиа."
-reply_prompt = "Напишите ответ — текстом или медиа."
+invite = "Нажмите кнопку ниже и оставьте анонимный комментрий!"
+prompt = "Напишите комментарий к посту. Медиа поддерживается!"
+reply_prompt = "Напишите ответ. Медиа поддерживается!"
 choose_nickname = "Под каким псевдонимом отправить?"
 published = "Комментарий отправлен."
 achievement = "🏅 Получено новое достижение: %s"     # takes the achievement title
 cancelled = "Черновик удалён. Напишите новый комментарий."
 
+# Plain text, emoji welcome: the bot adds the bold and italic itself and escapes
+# every line, so a stray "<" here cannot break the message.
 [messages.profile]
-title = "Ваша статистика"
-activity = "Комментариев: %d, ответов: %d"   # counts in this order
-achievements_head = "Достижения"
-no_achievements = "Пока ни одного. Они открывают новые псевдонимы."
-nicknames_head = "Доступные псевдонимы"
+title = "📊 Ваша статистика"
+comments = "💬 Комментариев: %d"
+replies = "↩️ Ответов: %d"
+achievements_head = "🏅 Достижения"
+no_achievements = "Пока ни одного — они открывают новые псевдонимы."
+nicknames_head = "🎭 Доступные псевдонимы"
 
 [messages.errors]
 banned = "Вы не можете оставлять комментарии."

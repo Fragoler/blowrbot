@@ -465,7 +465,7 @@ WHERE user_id = $1 AND status = $2`
 // comment, so a rule edited in the database takes effect without a restart.
 func (s *Storage) ActiveRules(ctx context.Context) ([]achievement.Rule, error) {
 	const q = `
-SELECT r.id, r.achievement_id, a.code, a.title,
+SELECT r.id, r.achievement_id, a.code, a.title, a.description,
        r.after_hour, r.before_hour,
        r.min_length, r.max_length, r.upper_only, COALESCE(r.pattern, ''),
        r.min_comments, r.min_replies, r.min_posts, r.min_achievements
@@ -484,7 +484,7 @@ ORDER BY r.id`
 	for rows.Next() {
 		var r achievement.Rule
 		err := rows.Scan(
-			&r.ID, &r.AchievementID, &r.AchievementCode, &r.AchievementTitle,
+			&r.ID, &r.AchievementID, &r.AchievementCode, &r.AchievementTitle, &r.AchievementDescription,
 			&r.AfterHour, &r.BeforeHour,
 			&r.MinLength, &r.MaxLength, &r.UpperOnly, &r.Pattern,
 			&r.MinComments, &r.MinReplies, &r.MinPosts, &r.MinAchievements,

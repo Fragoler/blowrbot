@@ -33,10 +33,13 @@ type Messages struct {
 	Errors Errors `toml:"errors"`
 }
 
-// Profile is the wording of the /profile screen.
+// Profile is the wording of the /profile screen. These are plain text: the bot
+// adds the bold and italic markup itself and escapes every line, so an operator
+// can put emoji here without worrying about breaking Telegram's HTML.
 type Profile struct {
 	Title            string `toml:"title"`
-	Activity         string `toml:"activity"`
+	Comments         string `toml:"comments"`
+	Replies          string `toml:"replies"`
 	AchievementsHead string `toml:"achievements_head"`
 	NoAchievements   string `toml:"no_achievements"`
 	NicknamesHead    string `toml:"nicknames_head"`
@@ -77,15 +80,16 @@ func DefaultMessages() Messages {
 		ReplyPrompt:    "Напишите ответ — текстом или медиа.",
 		ChooseNickname: "Под каким псевдонимом отправить?",
 		Published:      "Комментарий отправлен.",
-		Achievement:    "🏅 Новое достижение: %s",
+		Achievement:    "🏅 Новое достижение",
 		Cancelled:      "Черновик удалён. Напишите новый комментарий.",
 
 		Profile: Profile{
-			Title:            "Ваша статистика",
-			Activity:         "Комментариев: %d, ответов: %d",
-			AchievementsHead: "Достижения",
-			NoAchievements:   "Пока ни одного. Они открывают новые псевдонимы.",
-			NicknamesHead:    "Доступные псевдонимы",
+			Title:            "📊 Ваша статистика",
+			Comments:         "💬 Комментариев: %d",
+			Replies:          "↩️ Ответов: %d",
+			AchievementsHead: "🏅 Достижения",
+			NoAchievements:   "Пока ни одного — они открывают новые псевдонимы.",
+			NicknamesHead:    "🎭 Доступные псевдонимы",
 		},
 
 		Errors: Errors{
@@ -122,7 +126,8 @@ func (m Messages) validate() []error {
 		"messages.published":                 m.Published,
 		"messages.cancelled":                 m.Cancelled,
 		"messages.profile.title":             m.Profile.Title,
-		"messages.profile.activity":          m.Profile.Activity,
+		"messages.profile.comments":          m.Profile.Comments,
+		"messages.profile.replies":           m.Profile.Replies,
 		"messages.profile.achievements_head": m.Profile.AchievementsHead,
 		"messages.profile.no_achievements":   m.Profile.NoAchievements,
 		"messages.profile.nicknames_head":    m.Profile.NicknamesHead,

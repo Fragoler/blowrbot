@@ -243,47 +243,73 @@ func (b *Bot) onProfile(ctx context.Context, msg *models.Message) {
 		return
 	}
 
-	sent, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{
-		ChatID:    msg.Chat.ID,
-		Text:      profileText(got, b.cfg.Messages.Profile),
-		ParseMode: models.ParseModeHTML,
-	})
-	if err != nil {
-		b.log.Error("send profile", slog.Int64("user_id", userID), slog.Any("error", err))
-
-		return
-	}
-
-	b.remember(ctx, userID, sent.ID)
+	b.replyHTML(ctx, msg.Chat.ID, profileText(got, b.cfg.Messages.Profile))
 }
 
-// profileText renders the /profile screen. Everything a person or an operator
-// wrote is escaped: titles and masks come from the database.
+// profileText renders the /profile screen. Every line is escaped — the wording
+// comes from config and the titles and masks from the database — and the markup
+// is added here, so neither source can break Telegram's HTML.
 func profileText(p profile.Profile, m config.Profile) string {
 	var b strings.Builder
 
-	b.WriteString("<b>" + html.EscapeString(m.Title) + "</b>\n\n")
-	b.WriteString(html.EscapeString(fmt.Sprintf(m.Activity, p.Activity.Comments, p.Activity.Replies)))
+	b.WriteString(bold(m.Title))
+	b.WriteString("\n\n")
+	b.WriteString(esc(fmt.Sprintf(m.Comments, p.Activity.Comments)))
+	b.WriteString("\n")
+	b.WriteString(esc(fmt.Sprintf(m.Replies, p.Activity.Replies)))
 
-	b.WriteString("\n\n<b>" + html.EscapeString(m.AchievementsHead) + "</b>\n")
+	b.WriteString("\n\n")
+	b.WriteString(bold(withCount(m.AchievementsHead, len(p.Achievements))))
+	b.WriteString("\n")
+
 	if len(p.Achievements) == 0 {
-		b.WriteString(html.EscapeString(m.NoAchievements) + "\n")
+		b.WriteString("<i>" + esc(m.NoAchievements) + "</i>\n")
 	}
 
 	for _, a := range p.Achievements {
-		b.WriteString("• " + html.EscapeString(a.Title))
+		b.WriteString("• <b>" + esc(a.Title) + "</b>\n")
 		if a.Description != "" {
-			b.WriteString(" — " + html.EscapeString(a.Description))
+			b.WriteString("   <i>" + esc(a.Description) + "</i>\n")
 		}
-		b.WriteString("\n")
 	}
 
-	b.WriteString("\n<b>" + html.EscapeString(m.NicknamesHead) + "</b>\n")
+	b.WriteString("\n")
+	b.WriteString(bold(withCount(m.NicknamesHead, len(p.Nicknames))))
+	b.WriteString("\n")
+
 	for _, n := range p.Nicknames {
-		b.WriteString("• " + html.EscapeString(n.Label) + "\n")
+		b.WriteString("• " + esc(n.Label) + "\n")
 	}
 
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// achievementText is the notice a freshly earned achievement sends.
+func achievementText(head string, granted achievement.Granted) string {
+	text := bold(head) + "\n\n" + "<b>" + esc(granted.Title) + "</b>"
+	if granted.Description != "" {
+		text += "\n<i>" + esc(granted.Description) + "</i>"
+	}
+
+	return text
+}
+
+// withCount appends "(n)" to a heading, so a list says how long it is. An empty
+// list says so in words right below, and "(0)" beside it only repeats that.
+func withCount(head string, n int) string {
+	if n == 0 {
+		return head
+	}
+
+	return fmt.Sprintf("%s (%d)", head, n)
+}
+
+func bold(text string) string {
+	return "<b>" + esc(text) + "</b>"
+}
+
+func esc(text string) string {
+	return html.EscapeString(text)
 }
 
 func (b *Bot) onCallback(ctx context.Context, query *models.CallbackQuery) {
@@ -349,7 +375,7 @@ func (b *Bot) award(ctx context.Context, published comment.Comment) {
 	}
 
 	for _, a := range granted {
-		b.reply(ctx, published.UserID, fmt.Sprintf(b.cfg.Messages.Achievement, a.Title))
+		b.replyHTML(ctx, published.UserID, achievementText(b.cfg.Messages.Achievement, a))
 	}
 }
 
@@ -528,7 +554,21 @@ func extractMedia(msg *models.Message) ([]comment.Media, error) {
 
 // reply answers in the private chat, where chatID is also the user id.
 func (b *Bot) reply(ctx context.Context, chatID int64, text string) {
-	sent, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{ChatID: chatID, Text: text})
+	b.send(ctx, chatID, text, "")
+}
+
+// replyHTML answers with markup; the caller must have escaped everything it did
+// not write itself.
+func (b *Bot) replyHTML(ctx context.Context, chatID int64, text string) {
+	b.send(ctx, chatID, text, models.ParseModeHTML)
+}
+
+func (b *Bot) send(ctx context.Context, chatID int64, text string, mode models.ParseMode) {
+	sent, err := b.api.SendMessage(ctx, &tgbot.SendMessageParams{
+		ChatID:    chatID,
+		Text:      text,
+		ParseMode: mode,
+	})
 	if err != nil {
 		b.log.Error("send reply", slog.Int64("chat_id", chatID), slog.Any("error", err))
 

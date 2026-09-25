@@ -21,8 +21,9 @@ type Repository interface {
 
 // Granted is an achievement a comment just earned, for telling its author.
 type Granted struct {
-	Code  string
-	Title string
+	Code        string
+	Title       string
+	Description string
 }
 
 // Awarder is the single place where a comment turns into achievements.
@@ -109,7 +110,11 @@ func (a *Awarder) Award(ctx context.Context, e Event) ([]Granted, error) {
 			slog.String("achievement", rule.AchievementCode),
 		)
 
-		granted = append(granted, Granted{Code: rule.AchievementCode, Title: rule.AchievementTitle})
+		granted = append(granted, Granted{
+			Code:        rule.AchievementCode,
+			Title:       rule.AchievementTitle,
+			Description: rule.AchievementDescription,
+		})
 	}
 
 	return granted, nil

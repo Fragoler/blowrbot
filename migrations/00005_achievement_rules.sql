@@ -44,7 +44,24 @@ CREATE INDEX achievement_rules_active_idx ON achievement_rules (achievement_id) 
 INSERT INTO achievement_rules (achievement_id, pattern) 
     SELECT id, '(?i)пенис' FROM achievements WHERE code = 'misterP';
 
+INSERT INTO achievement_rules (achievement_id, after_hour, before_hour)
+    SELECT id, 0, 5 FROM achievements WHERE code = 'night_msg';
 
+INSERT INTO achievement_rules (achievement_id, min_length)
+    SELECT id, 1000 FROM achievements WHERE code = 'war_and_piece';
+
+INSERT INTO achievement_rules (achievement_id, upper_only)
+    SELECT id, true FROM achievements WHERE code = 'souls_scream';
+
+INSERT INTO achievement_rules (achievement_id, pattern)
+    SELECT id, '\?{3}' FROM achievements WHERE code = 'questions';
+
+INSERT INTO achievement_rules (achievement_id, pattern)
+    SELECT id, '(?i)(?:^|[^а-яёа-яё0-9_])(деканат|отчисл|академ)[а-яё]*(?:$|[^а-яёа-яё0-9_])' 
+    FROM achievements WHERE code = 'student_stress';
+
+INSERT INTO achievement_rules (achievement_id, min_comments)
+    SELECT id, 5 FROM achievements WHERE code = 'bed_expert';
 
 -- +goose Down
 
